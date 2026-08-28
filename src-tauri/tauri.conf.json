@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ai-mentor",
+  "version": "1.1.0",
+  "identifier": "local.ai-mentor.desktop",
+  "build": {
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/qdrant"
+    ],
+    "resources": {
+      "resources/cudart64_12.dll": "./cudart64_12.dll",
+      "resources/cublas64_12.dll": "./cublas64_12.dll",
+      "resources/cublasLt64_12.dll": "./cublasLt64_12.dll",
+      "resources/onnxruntime.dll": "./onnxruntime.dll",
+      "resources/onnxruntime_providers_shared.dll": "./onnxruntime_providers_shared.dll",
+      "resources/qdrant-storage/": "qdrant-storage/",
+      "resources/kb_chunks/": "kb_chunks/",
+      "resources/defaults/config.toml": "defaults/config.toml"
+    }
+  }
+}

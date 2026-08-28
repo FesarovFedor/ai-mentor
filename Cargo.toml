@@ -1,0 +1,43 @@
+[package]
+name = "mentor-core"
+version = "1.1.0"
+edition = "2021"
+description = "Ядро десктоп-приложения 'ИИ-наставник': RAG поверх локального Qdrant + заглушка LLM"
+
+[workspace]
+members = ["src-tauri"]
+
+[lib]
+name = "mentor_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "retrieval_test"
+path = "src/bin/retrieval_test.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+qdrant-client = "1.19"
+# ort-load-dynamic: onnxruntime подгружается из DLL в рантайме (статическая
+# линковка предсобранных библиотек требует MSVC новее установленного 14.40).
+fastembed = { version = "6", default-features = false, features = [
+    "ort-load-dynamic",
+    "hf-hub-native-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "native-tls"] }
+sha2 = "0.10"
+hex = "0.4"
+toml_edit = "0.25.13"
+fs4 = "1.1.0"
+# feature "cuda": llama.cpp собирается с CUDA-бэкендом (nvcc 12.8 в PATH),
+# веса и слои offload-ятся на GPU (см. inference.rs n_gpu_layers).
+llama-cpp-2 = { version = "0.1.154", features = ["cuda"] }
+# Прямая зависимость той же версии: нужен сырой enum llama_flash_attn_type
+# для with_flash_attention_policy (обёртка его не типизировала).
+llama-cpp-sys-2 = "0.1.154"
+encoding_rs = "0.8"
+

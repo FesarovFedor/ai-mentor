@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Mentor — локальный наставник</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= САЙДБАР ================= -->
+  <aside class="sidebar">
+    <div class="sidebar__top">
+      <div class="logo">AI<span class="accent">_</span>MENTOR<span class="logo__cursor">▊</span></div>
+      <div class="tagline">локальный наставник · полностью офлайн</div>
+      <button class="btn-new" id="btnNew">+ новый диалог</button>
+    </div>
+
+    <nav class="history" id="history"></nav>
+
+    <div class="sidebar__footer">
+      <div id="kbInfo">kb: …</div>
+      <button class="theme-toggle" id="themeToggle" title="Переключить тему">◐ тема: тёмная</button>
+    </div>
+  </aside>
+
+  <!-- ================= ЧАТ ================= -->
+  <main class="main">
+    <header class="chatbar">
+      <div class="chatbar__left">
+        <button class="nav-toggle" id="navToggle" aria-label="Меню">≡</button>
+        <span class="crumb">// база знаний</span>
+        <span class="crumb-sep">/</span>
+        <h1 class="chatbar__title" id="threadTitle">Новый диалог</h1>
+      </div>
+      <div class="chatbar__right">
+        <span class="ctx-chip" id="ctxChip">ctx top-k</span>
+        <button class="btn-settings" id="btnSettings" title="Настройки генерации">⚙ настройки</button>
+        <div class="status"><span class="dot"></span><span id="statusText"><b>подключение…</b></span></div>
+      </div>
+    </header>
+
+    <section class="feed" id="feed"></section>
+
+    <footer class="composer">
+      <div class="composer__box">
+        <span class="composer__prefix">❯</span>
+        <textarea id="prompt" rows="1" placeholder="Спроси про кванты, vLLM, датасеты…" disabled></textarea>
+        <button class="btn-send" id="btnSend" disabled>отпр. ↵</button>
+      </div>
+      <div class="composer__hint">
+        <span>enter — отправить · shift+enter — новая строка</span>
+        <span>контекст не покидает машину</span>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<div class="backdrop" id="backdrop"></div>
+
+<!-- ================= ОКНО НАСТРОЕК ================= -->
+<section class="settings" id="settingsModal" hidden>
+  <div class="settings__box">
+    <div class="settings__crumb">// настройки генерации</div>
+
+    <div class="settings__label">модель</div>
+    <div class="settings__model" id="setName">—</div>
+    <div class="settings__path" id="setPath">—</div>
+    <button class="btn-setup" id="btnChangeModel">сменить модель…</button>
+
+    <div class="settings__grid">
+      <label class="settings__field">
+        <span class="settings__label" for="setTemp">temperature</span>
+        <input id="setTemp" type="number" step="0.05" min="0" max="2" spellcheck="false" />
+      </label>
+      <label class="settings__field">
+        <span class="settings__label" for="setMaxTok">max_tokens</span>
+        <input id="setMaxTok" type="number" step="100" min="128" max="32768" spellcheck="false" />
+      </label>
+      <label class="settings__field settings__field--readonly">
+        <span class="settings__label">n_ctx (окно)</span>
+        <input id="setNCtx" type="text" readonly tabindex="-1" />
+      </label>
+    </div>
+
+    <pre class="error settings__error" id="setError" hidden></pre>
+
+    <div class="settings__row">
+      <button class="btn-setup btn-setup--primary" id="btnSaveSettings">сохранить</button>
+      <button class="btn-setup" id="btnCloseSettings">закрыть</button>
+    </div>
+    <div class="settings__foot">значения пишутся в config.toml · комментарии файла сохраняются</div>
+  </div>
+</section>
+
+<!-- ================= ЭКРАН "МОДЕЛЬ НЕ НАЙДЕНА" ================= -->
+<section class="setup" id="setupScreen" hidden>
+  <div class="setup__box">
+    <div class="setup__logo">AI<span class="accent">_</span>MENTOR<span class="logo__cursor">▊</span></div>
+    <div class="setup__crumb">// первый запуск · модель не найдена</div>
+    <p class="setup__text">
+      В config.toml поле <b>model_path</b> пустое или файла по пути нет.
+      Укажи готовый GGUF-файл или скачай модель — после этого откроется чат.
+    </p>
+
+    <div class="setup__row">
+      <button class="btn-setup" id="btnPickModel">1 · указать .gguf вручную…</button>
+      <span class="setup__or">или</span>
+      <button class="btn-setup" id="btnStartDownload">2 · скачать по URL</button>
+    </div>
+
+    <label class="setup__label" for="dlUrl">URL из config.toml (model_download_url)</label>
+    <input class="setup__url" id="dlUrl" type="text" readonly spellcheck="false"
+           placeholder="— пусто: заполни поле в config.toml и перезапусти приложение —" />
+    <div class="setup__hint" id="dlHint"></div>
+
+    <div class="setup__progress" id="dlBox" hidden>
+      <div class="progress-track"><div class="progress-fill" id="dlFill"></div></div>
+      <div class="progress-meta">
+        <span id="dlPercent">0%</span>
+        <span id="dlBytes"></span>
+        <span id="dlResumeNote"></span>
+      </div>
+    </div>
+
+    <pre class="error setup__error" id="setupError" hidden></pre>
+
+    <button class="btn-setup btn-setup--danger" id="btnCancelDownload" hidden>отменить загрузку</button>
+
+    <div class="setup__foot">всё локально · файл кладётся в каталог [download] dir из config.toml</div>
+  </div>
+</section>
+
+<!-- Markdown-парсер + санитизатор: локальные копии (CSP default-src 'self',
+     CDN-подгрузка невозможна), версии и хеши — в logs/build_log.md, этап L -->
+<script src="vendor/purify.min.js"></script>
+<script src="vendor/markdown-it.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

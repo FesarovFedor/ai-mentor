@@ -1,0 +1,64 @@
+﻿# РђСЂС‚РµС„Р°РєС‚С‹ СЃР±РѕСЂРєРё
+target/
+node_modules/
+dist/
+
+# Python
+.venv/
+__pycache__/
+
+# РљСЂСѓРїРЅС‹Рµ Р±РёРЅР°СЂРЅС‹Рµ Р°СЃСЃРµС‚С‹ Рё РјРѕРґРµР»Рё
+*.gguf
+*.msi
+*.exe
+*.dll
+tools_bin/
+.models/
+.data/
+
+# РЎРєСЂРёРЅС€РѕС‚С‹ РґР»СЏ РѕС‚Р»Р°РґРєРё / СЂРµС„РµСЂРµРЅСЃС‹
+reference/
+logs/screenshots/
+logs/*.png
+
+# РЎРµРєСЂРµС‚С‹ Рё РєР»СЋС‡Рё
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+
+# Р›РѕРєР°Р»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ Рё СЃРµСЃСЃРёРё
+session-*.md
+.claude/
+
+# Р’РЅСѓС‚СЂРµРЅРЅРёРµ СЂР°Р±РѕС‡РёРµ Р°СЂС‚РµС„Р°РєС‚С‹ СЂР°Р·СЂР°Р±РѕС‚РєРё (РЅРµ РґР»СЏ РїСѓР±Р»РёС‡РЅРѕРіРѕ СЂРµР»РёР·Р°)
+logs/
+manifest*.json
+task*.md
+audit-v4/
+reference/
+*.audit-k3/
+build_log.md
+ai_mentor.html
+assets/app-icon.png
+opencode.json
+package.json
+package-lock.json
+scripts/
+tools_migrate/
+
+# L5: Р±РёРЅР°СЂРЅС‹Рµ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё Р±Р°РЅРґР»Р° вЂ” СЃРєР°С‡РёРІР°СЋС‚СЃСЏ build.rs, РІ git РќР• С…СЂР°РЅСЏС‚СЃСЏ
+src-tauri/resources/cudart64_12.dll
+src-tauri/resources/cublas64_12.dll
+src-tauri/resources/cublasLt64_12.dll
+src-tauri/resources/onnxruntime.dll
+src-tauri/resources/onnxruntime_providers_shared.dll
+src-tauri/resources/qdrant/qdrant.exe
+src-tauri/resources/qdrant-storage/
+src-tauri/resources/kb_chunks/
+src-tauri/resources/defaults/config.toml
+src-tauri/binaries/
+target/deps_cache/
+.qdrant-initialized
+conc.md

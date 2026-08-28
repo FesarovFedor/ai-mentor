@@ -1,0 +1,7 @@
+# Конфигурация Cargo для этого проекта.
+# llama-cpp-sys-2 генерирует биндинги через bindgen, которому нужен libclang.
+# Portable LLVM лежит внутри рабочей директории (см. decisions.md D1),
+# поэтому путь прописан здесь — любой cargo-вызов из корня проекта работает
+# без ручных переменных окружения.
+[env]
+LIBCLANG_PATH = "D:\\AI_tests\\workflow\\app2\\tools_bin\\llvm\\clang+llvm-23.1.0-x86_64-pc-windows-msvc\\bin"
