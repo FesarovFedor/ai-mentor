@@ -24,10 +24,6 @@ generation.
 - **Streaming reasoning** — the model's `<think>` block streams live in a
   collapsible pane; the final answer renders token by token.
 
-| Setup screen (first run) | Streaming vs final — identical rendering |
-| --- | --- |
-| ![Setup screen](assets/setup_screen.png) | ![Streaming vs final](assets/streaming_vs_final.png) |
-
 ## 🖥 Tech Stack
 
 | Layer | Technology |

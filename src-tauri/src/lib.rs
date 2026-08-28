@@ -1,7 +1,7 @@
-//! Tauri-РєРѕРјР°РЅРґС‹: РјРѕСЃС‚ РјРµР¶РґСѓ С„СЂРѕРЅС‚РµРЅРґРѕРј (frontend/) Рё СЏРґСЂРѕРј mentor-core.
+//! Tauri-команды: мост между фронтендом (frontend/) и ядром mentor-core.
 //!
-//! Р­С‚Р°Рї L5: self-contained СѓСЃС‚Р°РЅРѕРІРєР° вЂ” Qdrant РїРѕРґРЅРёРјР°РµС‚СЃСЏ РєР°Рє sidecar
-//! (РјРѕРґСѓР»СЊ qdrant), РґР°РЅРЅС‹Рµ Р¶РёРІСѓС‚ РІ AppData, РїРѕСЂС‚ РІС‹Р±РёСЂР°РµС‚СЃСЏ РґРёРЅР°РјРёС‡РµСЃРєРё.
+//! Этап L5: self-contained установка — Qdrant поднимается как sidecar
+//! (модуль qdrant), данные живут в AppData, порт выбирается динамически.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod qdrant;
@@ -16,8 +16,8 @@ use anyhow::Context;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-// AsyncMutex вЂ” С‚РѕР»СЊРєРѕ РґР»СЏ РіРІР°СЂРґРѕРІ, СѓРґРµСЂР¶РёРІР°РµРјС‹С… С‡РµСЂРµР· .await (rag-РїРѕРёСЃРє,
-// СЃРµСЂРёР°Р»РёР·Р°С†РёСЏ Р·Р°РіСЂСѓР·РєРё РјРѕРґРµР»Рё). РљРѕСЂРѕС‚РєРёРµ СЃРёРЅС…СЂРѕРЅРЅС‹Рµ СЃРµРєС†РёРё вЂ” parking_lot.
+// AsyncMutex — только для гвардов, удерживаемых через .await (rag-поиск,
+// сериализация загрузки модели). Короткие синхронные секции — parking_lot.
 use tokio::sync::Mutex as AsyncMutex;
 
 use mentor_core::config::{save_generation_fields, save_string_field, AppConfig};
@@ -26,57 +26,57 @@ use mentor_core::generator::{generate_response_streaming, StreamKind};
 use mentor_core::inference::{gguf_display_name, Inference, LlamaBackend};
 use mentor_core::rag::{format_context, Rag, SearchHit};
 
-/// Р Р°Р·РґРµР»СЏРµРјРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ РїСЂРёР»РѕР¶РµРЅРёСЏ: RAG-СЏРґСЂРѕ + РєРѕРЅС„РёРі + Р·Р°РіСЂСѓР·С‡РёРє РјРѕРґРµР»Рё.
+/// Разделяемое состояние приложения: RAG-ядро + конфиг + загрузчик модели.
 ///
-/// Р’Р»Р°РґРµР»РµС† РµРґРёРЅСЃС‚РІРµРЅРЅРѕРіРѕ LlamaBackend: Arc РґСѓР±Р»РёСЂСѓРµС‚СЃСЏ РІ РєР°Р¶РґСѓСЋ Inference,
-/// РїРѕСЌС‚РѕРјСѓ Р±СЌРєРµРЅРґ Р¶РёРІС‘С‚, РїРѕРєР° Р¶РёРІР° С…РѕС‚СЊ РѕРґРЅР° РјРѕРґРµР»СЊ, Рё РіР°СЂР°РЅС‚РёСЂРѕРІР°РЅРЅРѕ
-/// РґСЂРѕРїР°РµС‚СЃСЏ РІРјРµСЃС‚Рµ СЃ AppState РїСЂРё Р·Р°РІРµСЂС€РµРЅРёРё РїСЂРёР»РѕР¶РµРЅРёСЏ (RunEvent::Exit) вЂ”
-/// CUDA-РєРѕРЅС‚РµРєСЃС‚ РѕСЃРІРѕР±РѕР¶РґР°РµС‚ VRAM (С„РёРєСЃ P0 СѓС‚РµС‡РєРё РёР· Р°СѓРґРёС‚Р°, СЌС‚Р°Рї L4).
+/// Владелец единственного LlamaBackend: Arc дублируется в каждую Inference,
+/// поэтому бэкенд живёт, пока жива хоть одна модель, и гарантированно
+/// дропается вместе с AppState при завершении приложения (RunEvent::Exit) —
+/// CUDA-контекст освобождает VRAM (фикс P0 утечки из аудита, этап L4).
 pub struct AppState {
     pub backend: Arc<LlamaBackend>,
-    /// RAG РґРµСЂР¶РёС‚СЃСЏ С‡РµСЂРµР· .await (РїРѕРёСЃРє РїРѕ Qdrant) вЂ” AsyncMutex.
+    /// RAG держится через .await (поиск по Qdrant) — AsyncMutex.
     pub rag: AsyncMutex<Rag>,
-    /// РљРѕРЅС„РёРі РїРѕРґ РјСЊСЋС‚РµРєСЃРѕРј: РѕР±РЅРѕРІР»СЏРµС‚СЃСЏ РїРѕСЃР»Рµ РІС‹Р±РѕСЂР°/СЃРєР°С‡РёРІР°РЅРёСЏ РјРѕРґРµР»Рё.
-    /// РљРѕСЂРѕС‚РєРёРµ СЃРµРєС†РёРё Р±РµР· .await вЂ” parking_lot.
+    /// Конфиг под мьютексом: обновляется после выбора/скачивания модели.
+    /// Короткие секции без .await — parking_lot.
     pub cfg: Mutex<AppConfig>,
-    /// РџСѓС‚СЊ Рє config.toml РІ AppData (Р·Р°РїРёСЃСЊ model_path РїРѕСЃР»Рµ РІС‹Р±РѕСЂР°/СЃРєР°С‡РёРІР°РЅРёСЏ).
+    /// Путь к config.toml в AppData (запись model_path после выбора/скачивания).
     pub cfg_path: PathBuf,
-    /// Р—Р°РіСЂСѓР¶РµРЅРЅР°СЏ LLM Рё РїСѓС‚СЊ, РїРѕ РєРѕС‚РѕСЂРѕРјСѓ РѕРЅР° Р·Р°РіСЂСѓР¶РµРЅР° (РґР»СЏ РїРµСЂРµР·Р°РіСЂСѓР·РєРё
-    /// РїСЂРё СЃРјРµРЅРµ model_path). РњРѕРґРµР»СЊ Р»РµРЅРёРІРѕ РіСЂСѓР·РёС‚СЃСЏ РЅР° РїРµСЂРІРѕРј РІРѕРїСЂРѕСЃРµ.
+    /// Загруженная LLM и путь, по которому она загружена (для перезагрузки
+    /// при смене model_path). Модель лениво грузится на первом вопросе.
     pub llm: Mutex<Option<(PathBuf, Arc<Inference>)>>,
-    /// РЎРµСЂРёР°Р»РёР·СѓРµС‚ Р·Р°РіСЂСѓР·РєСѓ/РїРµСЂРµР·Р°РіСЂСѓР·РєСѓ РјРѕРґРµР»Рё: Р±РµР· РЅРµРіРѕ РґРІР° РїР°СЂР°Р»Р»РµР»СЊРЅС‹С…
-    /// send_message РїСЂРё СЃРјРµРЅРµ РјРѕРґРµР»Рё Р·Р°РіСЂСѓР·РёР»Рё Р±С‹ РµС‘ РґРІР°Р¶РґС‹. Р“РІР°СЂРґ РґРµСЂР¶РёС‚СЃСЏ
-    /// С‡РµСЂРµР· .await (С‚Р°Рј РіСЂСѓР·РёС‚СЃСЏ РјРѕРґРµР»СЊ) вЂ” AsyncMutex.
+    /// Сериализует загрузку/перезагрузку модели: без него два параллельных
+    /// send_message при смене модели загрузили бы её дважды. Гвард держится
+    /// через .await (там грузится модель) — AsyncMutex.
     pub llm_load_lock: AsyncMutex<()>,
-    /// РћС‚РјРµРЅР° Р°РєС‚РёРІРЅРѕР№ Р·Р°РіСЂСѓР·РєРё.
+    /// Отмена активной загрузки.
     pub download_cancel: Mutex<CancelToken>,
-    /// РРґС‘С‚ Р»Рё СЃРµР№С‡Р°СЃ Р·Р°РіСЂСѓР·РєР° (Р·Р°С‰РёС‚Р° РѕС‚ РїРѕРІС‚РѕСЂРЅРѕРіРѕ Р·Р°РїСѓСЃРєР°).
+    /// Рдёт ли сейчас загрузка (защита от повторного запуска).
     pub download_active: AtomicBool,
-    /// РџРѕСЃР»РµРґРЅРёР№ СЃРЅРёРјРѕРє РїСЂРѕРіСЂРµСЃСЃР° Р·Р°РіСЂСѓР·РєРё РґР»СЏ РѕРїСЂРѕСЃР° С„СЂРѕРЅС‚РѕРј (СЃС‚СЂР°С…РѕРІРєР° РЅР°
-    /// СЃР»СѓС‡Р°Р№, РµСЃР»Рё С€РёРЅР° СЃРѕР±С‹С‚РёР№ РЅРµРґРѕСЃС‚СѓРїРЅР° РІРѕ РІРµР±РІСЊСЋ). РљРѕСЂРѕС‚РєРёРµ СЃРµРєС†РёРё,
-    /// РЅСѓР¶РµРЅ Рё РёР· СЃРёРЅС…СЂРѕРЅРЅРѕРіРѕ РєРѕР»Р±СЌРєР° вЂ” parking_lot::Mutex.
+    /// Последний снимок прогресса загрузки для опроса фронтом (страховка на
+    /// случай, если шина событий недоступна во вебвью). Короткие секции,
+    /// нужен и из синхронного колбэка — parking_lot::Mutex.
     pub download_progress: Mutex<Option<DownloadEvent>>,
-    /// РќР°РєРѕРїР»РµРЅРЅС‹Р№ РїРѕС‚РѕРє РіРµРЅРµСЂР°С†РёРё (thinking/answer) РґР»СЏ РѕРїСЂРѕСЃР° С„СЂРѕРЅС‚РѕРј вЂ”
-    /// С‚РѕС‚ Р¶Рµ Р·Р°РїР°СЃРЅРѕР№ РєР°РЅР°Р», С‡С‚Рѕ Сѓ download_progress. РђР±СЃРѕР»СЋС‚РЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ:
-    /// С„СЂРѕРЅС‚ СЃРІРµСЂСЏРµС‚ РґР»РёРЅС‹ Рё РґРѕР·Р°Р±РёСЂР°РµС‚ РЅРµРґРѕСЃС‚Р°СЋС‰РµРµ.
+    /// Накопленный поток генерации (thinking/answer) для опроса фронтом —
+    /// тот же запасной канал, что у download_progress. Абсолютные значения:
+    /// фронт сверяет длины и дозабирает недостающее.
     pub gen_stream: Mutex<GenStreamSnapshot>,
-    /// Р”РѕС‡РµСЂРЅРёР№ РїСЂРѕС†РµСЃСЃ Qdrant sidecar: РѕСЃС‚Р°РЅР°РІР»РёРІР°РµС‚СЃСЏ РІ RunEvent::Exit.
+    /// Дочерний процесс Qdrant sidecar: останавливается в RunEvent::Exit.
     pub qdrant: qdrant::QdrantProc,
-    /// Pre-flight (Р­С‚Р°Рї L5, С€Р°Рі 6): РµСЃС‚СЊ Р»Рё NVIDIA-РґСЂР°Р№РІРµСЂ РІ СЃРёСЃС‚РµРјРµ.
-    /// false -> РёРЅС„РµСЂРµРЅСЃ Р±Р»РѕРєРёСЂСѓРµС‚СЃСЏ СЃ РґСЂСѓР¶РµР»СЋР±РЅРѕР№ РѕС€РёР±РєРѕР№ (РґРµРіСЂР°РґР°С†РёСЏ
-    /// РІС‹Р±СЂР°РЅР° РєР°Рє "Р±Р»РѕРєРёСЂРѕРІРєР°", РЅРµ CPU: РїРѕР»РЅС‹Р№ РѕС„С„Р»РѕР°Рґ 3B-РјРѕРґРµР»Рё РЅР° CPU
-    /// Р·Р°РЅСЏР» Р±С‹ РјРёРЅСѓС‚С‹ РЅР° С‚РѕРєРµРЅ Рё РІС‹РіР»СЏРґРµР» Р±С‹ РєР°Рє Р·Р°РІРёСЃР°РЅРёРµ).
+    /// Pre-flight (Этап L5, шаг 6): есть ли NVIDIA-драйвер в системе.
+    /// false -> инференс блокируется с дружелюбной ошибкой (деградация
+    /// выбрана как "блокировка", не CPU: полный оффлоад 3B-модели на CPU
+    /// занял бы минуты на токен и выглядел бы как зависание).
     pub gpu_ready: AtomicBool,
 }
 
 #[derive(Serialize)]
 pub struct ChatReply {
     pub answer: String,
-    /// РҐРѕРґ СЂР°СЃСЃСѓР¶РґРµРЅРёР№ РјРѕРґРµР»Рё (<think>вЂ¦</think>); РїСѓСЃС‚ Сѓ РЅРѕРЅ-reasoning
-    /// РјРѕРґРµР»РµР№. Р¤СЂРѕРЅС‚РµРЅРґ СЂРµРЅРґРµСЂРёС‚ РµРіРѕ РѕС‚РґРµР»СЊРЅС‹Рј СЃРІРѕСЂР°С‡РёРІР°РµРјС‹Рј Р±Р»РѕРєРѕРј.
+    /// Ход рассуждений модели (<think>…</think>); пуст у нон-reasoning
+    /// моделей. Фронтенд рендерит его отдельным сворачиваемым блоком.
     pub thinking: String,
     pub sources: Vec<SearchHit>,
-    /// РџРѕР»РЅС‹Р№ РїСЂРѕРјРїС‚, РєРѕС‚РѕСЂС‹Р№ РїРѕР»СѓС‡РёР»(Р° Р±С‹) LLM.
+    /// Полный промпт, который получил(а бы) LLM.
     pub prompt_for_model: String,
 }
 
@@ -91,31 +91,31 @@ pub struct StatusInfo {
     pub generator_stub: bool,
 }
 
-/// РЎРѕСЃС‚РѕСЏРЅРёРµ РјРѕРґРµР»Рё РґР»СЏ СЃС‚Р°СЂС‚РѕРІРѕРіРѕ СЌРєСЂР°РЅР° (С‡РёС‚Р°РµС‚ РєРѕРЅС„РёРі СЃ РґРёСЃРєР° вЂ” РІСЃРµРіРґР° СЃРІРµР¶РёР№).
+/// Состояние модели для стартового экрана (читает конфиг с диска — всегда свежий).
 #[derive(Serialize, Clone)]
 pub struct ModelStatus {
-    /// РњРѕРґРµР»СЊ РіРѕС‚РѕРІР°: РїСѓС‚СЊ Р·Р°РґР°РЅ Рё С„Р°Р№Р» СЃСѓС‰РµСЃС‚РІСѓРµС‚.
+    /// Модель готова: путь задан и файл существует.
     pub found: bool,
     pub path: String,
-    /// РџР»РµР№СЃС…РѕР»РґРµСЂ URL РёР· config.toml (РїСѓСЃС‚ -> СЃРєР°С‡РёРІР°РЅРёРµ РЅРµРґРѕСЃС‚СѓРїРЅРѕ).
+    /// Плейсхолдер URL из config.toml (пуст -> скачивание недоступно).
     pub download_url: String,
-    /// Р—Р°РґР°РЅР° Р»Рё РєРѕРЅС‚СЂРѕР»СЊРЅР°СЏ СЃСѓРјРјР° РґР»СЏ РїСЂРѕРІРµСЂРєРё РїРѕСЃР»Рµ СЃРєР°С‡РёРІР°РЅРёСЏ.
+    /// Задана ли контрольная сумма для проверки после скачивания.
     pub sha256_set: bool,
 }
 
-/// РЎРѕР±С‹С‚РёРµ РїСЂРѕРіСЂРµСЃСЃР° Р·Р°РіСЂСѓР·РєРё РІ РІРµР±РІСЊСЋ (РєР°РЅР°Р» "download-progress").
+/// Событие прогресса загрузки в вебвью (канал "download-progress").
 #[derive(Serialize, Clone)]
 pub struct DownloadEvent {
     pub downloaded: u64,
-    /// 0 = СЂР°Р·РјРµСЂ РЅРµРёР·РІРµСЃС‚РµРЅ, РїСЂРѕС†РµРЅС‚ РЅРµ РїРѕСЃС‡РёС‚Р°С‚СЊ.
+    /// 0 = размер неизвестен, процент не посчитать.
     pub total: u64,
     pub resumed_from: u64,
     pub done: bool,
     pub error: Option<String>,
 }
 
-/// РЎРѕР±С‹С‚РёРµ РїРѕС‚РѕРєРѕРІРѕР№ РіРµРЅРµСЂР°С†РёРё РІ РІРµР±РІСЊСЋ (РєР°РЅР°Р» "gen-token"): РѕРґРёРЅ РєСѓСЃРѕРє
-/// С‚РµРєСЃС‚Р°, СЂР°Р·РјРµС‡РµРЅРЅС‹Р№ РїРѕ Р±Р»РѕРєСѓ (thinking/answer) РЅР° Р±СЌРєРµРЅРґРµ.
+/// Событие потоковой генерации в вебвью (канал "gen-token"): один кусок
+/// текста, размеченный по блоку (thinking/answer) на бэкенде.
 #[derive(Serialize, Clone)]
 pub struct GenTokenEvent {
     /// "think" | "answer"
@@ -123,12 +123,12 @@ pub struct GenTokenEvent {
     pub text: String,
 }
 
-/// РЎРЅРёРјРѕРє РЅР°РєРѕРїР»РµРЅРЅРѕРіРѕ СЃС‚СЂРёРјР° РіРµРЅРµСЂР°С†РёРё (Р·Р°РїР°СЃРЅРѕР№ РєР°РЅР°Р» РґР»СЏ РѕРїСЂРѕСЃР°).
+/// Снимок накопленного стрима генерации (запасной канал для опроса).
 #[derive(Serialize, Clone, Default)]
 pub struct GenStreamSnapshot {
     pub thinking: String,
     pub answer: String,
-    /// Р“РµРЅРµСЂР°С†РёСЏ Р·Р°РІРµСЂС€РµРЅР° (С„СЂРѕРЅС‚ РјРѕР¶РµС‚ РїСЂРµРєСЂР°С‚РёС‚СЊ РѕРїСЂРѕСЃ).
+    /// Генерация завершена (фронт может прекратить опрос).
     pub done: bool,
 }
 
@@ -142,9 +142,9 @@ fn read_model_status(cfg_path: &std::path::Path) -> Result<ModelStatus, String> 
     })
 }
 
-/// РљР°С‚Р°Р»РѕРі РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёС… РґР°РЅРЅС‹С…: %APPDATA%\ai-mentor (Р­С‚Р°Рї L5, С€Р°Рі 7).
-/// Р’СЃРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёРµ РґР°РЅРЅС‹Рµ (config.toml, РјРѕРґРµР»Рё, РєСЌС€ СЌРјР±РµРґРґРёРЅРіРѕРІ,
-/// storage РІРµРєС‚РѕСЂРЅРѕР№ Р‘Р”) Р¶РёРІСѓС‚ Р·РґРµСЃСЊ вЂ” РєР°С‚Р°Р»РѕРі СѓСЃС‚Р°РЅРѕРІРєРё РјРѕР¶РµС‚ Р±С‹С‚СЊ
+/// Каталог пользовательских данных: %APPDATA%\ai-mentor (Этап L5, шаг 7).
+/// Все пользовательские данные (config.toml, модели, кэш эмбеддингов,
+/// storage векторной БД) живут здесь — каталог установки может быть
 /// read-only (Program Files).
 fn app_data_dir() -> PathBuf {
     let base = std::env::var("APPDATA")
@@ -153,10 +153,10 @@ fn app_data_dir() -> PathBuf {
     base.join("ai-mentor")
 }
 
-/// РџРµСЂРІС‹Р№ Р·Р°РїСѓСЃРє: РµСЃР»Рё config.toml РµС‰С‘ РЅРµС‚ РІ AppData вЂ” СЂР°Р·РІРѕСЂР°С‡РёРІР°РµРј РµРіРѕ РёР·
-/// Р±Р°РЅРґР»Р° (РїСѓС‚Рё kb_chunks РїРµСЂРµРїРёСЃС‹РІР°СЋС‚СЃСЏ СЃ ../kb_chunks РЅР° AppData) Рё
-/// РєРѕРїРёСЂСѓРµРј РґР°РЅРЅС‹Рµ Р±Р°Р·С‹ Р·РЅР°РЅРёР№ (С‚РµРєСЃС‚С‹ С‡Р°РЅРєРѕРІ + РІРµРєС‚РѕСЂРЅС‹Р№ СЃС‚РѕСЂ СЃ
-/// РєРѕР»Р»РµРєС†РёРµР№ mentor_kb). РџРѕРІС‚РѕСЂРЅС‹Рµ Р·Р°РїСѓСЃРєРё РЅРёС‡РµРіРѕ РЅРµ РїРµСЂРµР·Р°С‚РёСЂР°СЋС‚.
+/// Первый запуск: если config.toml ещё нет в AppData — разворачиваем его из
+/// бандла (пути kb_chunks переписываются с ../kb_chunks на AppData) и
+/// копируем данные базы знаний (тексты чанков + векторный стор с
+/// коллекцией mentor_kb). Повторные запуски ничего не перезатирают.
 fn provision_first_run(resource_dir: &Path) -> Result<PathBuf, anyhow::Error> {
     let dir = app_data_dir();
     fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
@@ -165,37 +165,37 @@ fn provision_first_run(resource_dir: &Path) -> Result<PathBuf, anyhow::Error> {
         let template_path = resource_dir.join("defaults").join("config.toml");
         let template = fs::read_to_string(&template_path).with_context(|| {
             format!(
-                "РІ Р±Р°РЅРґР»Рµ РЅРµС‚ С€Р°Р±Р»РѕРЅР° РєРѕРЅС„РёРіР° {}",
+                "в бандле нет шаблона конфига {}",
                 template_path.display()
             )
         })?;
-        // kb_chunks РІ Р±Р°РЅРґР»Рµ Р»РµР¶Р°С‚ СЂСЏРґРѕРј СЃ config.toml РІ AppData.
+        // kb_chunks в бандле лежат рядом с config.toml в AppData.
         let rewritten = template.replace("../kb_chunks", "kb_chunks");
         fs::write(&cfg_path, rewritten)
-            .with_context(|| format!("Р·Р°РїРёСЃСЊ {}", cfg_path.display()))?;
+            .with_context(|| format!("запись {}", cfg_path.display()))?;
     }
     copy_missing(
         &resource_dir.join("kb_chunks"),
         &dir.join("kb_chunks"),
-        "С‚РµРєСЃС‚С‹ С‡Р°РЅРєРѕРІ",
+        "тексты чанков",
     )?;
     copy_missing(
         &resource_dir.join("qdrant-storage"),
         &dir.join("qdrant").join("storage"),
-        "РІРµРєС‚РѕСЂРЅС‹Р№ СЃС‚РѕСЂ Qdrant",
+        "векторный стор Qdrant",
     )?;
     Ok(cfg_path)
 }
 
 fn copy_missing(src: &Path, dst: &Path, what: &str) -> Result<(), anyhow::Error> {
     if !src.exists() {
-        anyhow::bail!("{what}: РІ Р±Р°РЅРґР»Рµ РЅРµС‚ {}", src.display());
+        anyhow::bail!("{what}: в бандле нет {}", src.display());
     }
     if dst.exists() {
         return Ok(());
     }
     copy_tree(src, dst)
-        .with_context(|| format!("РєРѕРїРёСЂРѕРІР°РЅРёРµ {what} РІ {}", dst.display()))
+        .with_context(|| format!("копирование {what} в {}", dst.display()))
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -212,9 +212,9 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// РџРµСЂРµС‡РёС‚С‹РІР°РµС‚ config.toml СЃ РґРёСЃРєР° РІ AppState, РЎРћРҐР РђРќРЇРЇ РґРёРЅР°РјРёС‡РµСЃРєРёР№
-/// Р°РґСЂРµСЃ Qdrant: РїРѕСЂС‚ РІС‹Р±РёСЂР°РµС‚СЃСЏ РІ СЂР°РЅС‚Р°Р№РјРµ Рё РЅР° РґРёСЃРє РЅРµ РїРёС€РµС‚СЃСЏ (L5,
-/// С€Р°Рі 5), РїРѕСЌС‚РѕРјСѓ РїРѕСЃР»Рµ РєР°Р¶РґРѕРіРѕ reload РµРіРѕ РЅСѓР¶РЅРѕ РЅР°РєР»Р°РґС‹РІР°С‚СЊ Р·Р°РЅРѕРІРѕ.
+/// Перечитывает config.toml с диска в AppState, СОХРАНЯЯ динамический
+/// адрес Qdrant: порт выбирается в рантайме и на диск не пишется (L5,
+/// шаг 5), поэтому после каждого reload его нужно накладывать заново.
 fn reload_cfg_preserving_port(app: &AppState) -> Result<(), String> {
     let mut fresh = AppConfig::load(&app.cfg_path).map_err(|e| format!("config.toml: {e:#}"))?;
     fresh.qdrant.url = app.cfg.lock().qdrant.url.clone();
@@ -222,8 +222,8 @@ fn reload_cfg_preserving_port(app: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Pre-flight (С€Р°Рі 6): РїСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ NVIDIA-РґСЂР°Р№РІРµСЂР° (nvcuda.dll вЂ”
-/// РєР»РёРµРЅС‚СЃРєР°СЏ Р±РёР±Р»РёРѕС‚РµРєР° CUDA СЃС‚Р°РІРёС‚СЃСЏ РўРћР›Р¬РљРћ РІРјРµСЃС‚Рµ СЃ РґСЂР°Р№РІРµСЂРѕРј NVIDIA).
+/// Pre-flight (шаг 6): проверяем наличие NVIDIA-драйвера (nvcuda.dll —
+/// клиентская библиотека CUDA ставится ТОЛЬКО вместе с драйвером NVIDIA).
 pub fn gpu_driver_available() -> bool {
     let system32 = std::env::var("SystemRoot").map_or_else(
         |_| PathBuf::from(r"C:\Windows"),
@@ -232,48 +232,48 @@ pub fn gpu_driver_available() -> bool {
     system32.join("nvcuda.dll").is_file()
 }
 
-/// РљР°С‚Р°Р»РѕРі СЂРµСЃСѓСЂСЃРѕРІ Р±Р°РЅРґР»Р°: Tauri РєР»Р°РґС‘С‚ СЂРµСЃСѓСЂСЃС‹ (DLL, qdrant-storage,
-/// kb_chunks, defaults/) СЂСЏРґРѕРј СЃ РѕСЃРЅРѕРІРЅС‹Рј Р±РёРЅР°СЂРµРј вЂ” Рё РІ MSI, Рё РїСЂРё dev-Р·Р°РїСѓСЃРєРµ.
+/// Каталог ресурсов бандла: Tauri кладёт ресурсы (DLL, qdrant-storage,
+/// kb_chunks, defaults/) рядом с основным бинарем — и в MSI, и при dev-запуске.
 fn resource_dir() -> Result<PathBuf, anyhow::Error> {
     Ok(std::env::current_exe()
-        .context("РЅРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РєР°С‚Р°Р»РѕРі РїСЂРёР»РѕР¶РµРЅРёСЏ")?
+        .context("не удалось определить каталог приложения")?
         .parent()
-        .expect("exe Р»РµР¶РёС‚ РІ РєР°С‚Р°Р»РѕРіРµ")
+        .expect("exe лежит в каталоге")
         .to_path_buf())
 }
 
-/// РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ СЃРѕСЃС‚РѕСЏРЅРёСЏ: РїРµСЂРІС‹Р№ Р·Р°РїСѓСЃРє -> Qdrant sidecar -> RAG -> РјРѕРґРµР»СЊ.
-/// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РёР· setup-С…СѓРєР° Р”Рћ СЃРѕР·РґР°РЅРёСЏ РѕРєРЅР°: РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РІРёРґРёС‚
-/// "Р·Р°РІРёСЃС€РµРіРѕ" РѕРєРЅР°, Р° Р»СЋР±С‹Рµ РѕС€РёР±РєРё РїРѕРєР°Р·С‹РІР°СЋС‚СЃСЏ РґРёР°Р»РѕРіРѕРј (РЅРµ РјРѕР»С‡Р°).
+/// Рнициализация состояния: первый запуск -> Qdrant sidecar -> RAG -> модель.
+/// Вызывается из setup-хука ДО создания окна: пользователь не видит
+/// "зависшего" окна, а любые ошибки показываются диалогом (не молча).
 async fn init_state() -> Result<AppState, String> {
     let resource_dir =
-        resource_dir().map_err(|e| format!("РєР°С‚Р°Р»РѕРі СЂРµСЃСѓСЂСЃРѕРІ: {e:#}"))?;
-    // РўСЏР¶С‘Р»РѕРµ РєРѕРїРёСЂРѕРІР°РЅРёРµ РґР°РЅРЅС‹С… РїРµСЂРІРѕРіРѕ Р·Р°РїСѓСЃРєР° (РґРѕ ~600 РњР‘ СЃС‚РѕСЂ Qdrant) вЂ”
-    // РІ Р±Р»РѕРєРёСЂСѓСЋС‰РµРј РїСѓР»Рµ, main-РїРѕС‚РѕРє РЅРµ Р·Р°РЅСЏС‚ С„Р°Р№Р»РѕРІС‹Рј I/O.
+        resource_dir().map_err(|e| format!("каталог ресурсов: {e:#}"))?;
+    // Тяжёлое копирование данных первого запуска (до ~600 МБ стор Qdrant) —
+    // в блокирующем пуле, main-поток не занят файловым I/O.
     let res_for_provision = resource_dir.clone();
     let cfg_path =
         tauri::async_runtime::spawn_blocking(move || provision_first_run(&res_for_provision))
             .await
-            .map_err(|e| format!("РїРѕС‚РѕРє РїРµСЂРІРѕРіРѕ Р·Р°РїСѓСЃРєР°: {e}"))?
-            .map_err(|e| format!("РїРµСЂРІС‹Р№ Р·Р°РїСѓСЃРє: {e:#}"))?;
+            .map_err(|e| format!("поток первого запуска: {e}"))?
+            .map_err(|e| format!("первый запуск: {e:#}"))?;
 
     let mut cfg = AppConfig::load(&cfg_path).map_err(|e| format!("config.toml: {e:#}"))?;
 
-    // Pre-flight РґСЂР°Р№РІРµСЂР°: РјРѕРґРµР»СЊ РіСЂСѓР·РёРј С‚РѕР»СЊРєРѕ РµСЃР»Рё РµСЃС‚СЊ NVIDIA.
+    // Pre-flight драйвера: модель грузим только если есть NVIDIA.
     let gpu_ready = gpu_driver_available();
     let backend = Arc::new(
         mentor_core::inference::init_backend()
-            .map_err(|e| format!("РёРЅРёС†РёР°Р»РёР·Р°С†РёСЏ llama.cpp backend: {e:#}"))?,
+            .map_err(|e| format!("инициализация llama.cpp backend: {e:#}"))?,
     );
 
-    // Qdrant sidecar: РґРёРЅР°РјРёС‡РµСЃРєРёР№ РїРѕСЂС‚ + AppData-СЃС‚РѕСЂ; Р¶РґС‘Рј readiness.
+    // Qdrant sidecar: динамический порт + AppData-стор; ждём readiness.
     let qproc = qdrant::QdrantProc::new();
     let storage = app_data_dir().join("qdrant").join("storage");
     let sidecar_exe = qdrant::sidecar_exe_path().map_err(|e| format!("Qdrant: {e:#}"))?;
     let (http_port, grpc_port) =
         qdrant::start_qdrant(&qproc, &sidecar_exe, &storage).map_err(|e| {
             qdrant::stop_qdrant(&qproc);
-            format!("Р·Р°РїСѓСЃРє Qdrant: {e:#}")
+            format!("запуск Qdrant: {e:#}")
         })?;
     qdrant::wait_for_ready(http_port, Duration::from_secs(30))
         .await
@@ -281,13 +281,13 @@ async fn init_state() -> Result<AppState, String> {
             qdrant::stop_qdrant(&qproc);
             format!("Qdrant: {e:#}")
         })?;
-    // РџРѕСЂС‚ вЂ” РІРµР»РёС‡РёРЅР° РІСЂРµРјРµРЅРё РёСЃРїРѕР»РЅРµРЅРёСЏ: РїРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј Р°РґСЂРµСЃ РўРћР›Р¬РљРћ РІ
-    // РїР°РјСЏС‚Рё (config.toml РЅР° РґРёСЃРєРµ РѕСЃС‚Р°С‘С‚СЃСЏ СЃ РґРµС„РѕР»С‚РЅС‹Рј 6334).
+    // Порт — величина времени исполнения: переопределяем адрес ТОЛЬКО в
+    // памяти (config.toml на диске остаётся с дефолтным 6334).
     cfg.qdrant.url = format!("http://127.0.0.1:{grpc_port}");
 
     let rag = Rag::new(cfg.clone())
         .await
-        .map_err(|e| format!("РёРЅРёС†РёР°Р»РёР·Р°С†РёСЏ RAG: {e:#}"))?;
+        .map_err(|e| format!("инициализация RAG: {e:#}"))?;
 
     let llm = if gpu_ready && cfg.model_ready() {
         let path_str = cfg.model_file_path().to_string_lossy().into_owned();
@@ -296,12 +296,12 @@ async fn init_state() -> Result<AppState, String> {
             mentor_core::inference::load_model(&path_str, &backend)
         })
         .await
-        .map_err(|e| format!("РїРѕС‚РѕРє РїСЂРµРґР·Р°РіСЂСѓР·РєРё РјРѕРґРµР»Рё: {e}"))?
+        .map_err(|e| format!("поток предзагрузки модели: {e}"))?
         {
             Ok(inf) => Some((cfg.model_file_path(), Arc::new(inf))),
             Err(e) => {
-                eprintln!("РїСЂРµРґР·Р°РіСЂСѓР·РєР° РјРѕРґРµР»Рё РЅРµ СѓРґР°Р»Р°СЃСЊ: {e:#}");
-                None // РїСЂРёС‡РёРЅР° СѓРІРёРґРёС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РїСЂРё РїРµСЂРІРѕР№ РѕС‚РїСЂР°РІРєРµ РІРѕРїСЂРѕСЃР°
+                eprintln!("предзагрузка модели не удалась: {e:#}");
+                None // причина увидит пользователь при первой отправке вопроса
             }
         }
     } else {
@@ -323,19 +323,19 @@ async fn init_state() -> Result<AppState, String> {
     })
 }
 
-/// Р’РѕР·РІСЂР°С‰Р°РµС‚ Р·Р°РіСЂСѓР¶РµРЅРЅСѓСЋ РјРѕРґРµР»СЊ, РїСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё РіСЂСѓР·РёС‚ РµС‘ РІ С„РѕРЅРµ
-/// (Р»РµРЅРёРІРѕ РЅР° РїРµСЂРІРѕРј РІРѕРїСЂРѕСЃРµ) РёР»Рё РїРµСЂРµР·Р°РіСЂСѓР¶Р°РµС‚ РїРѕСЃР»Рµ СЃРјРµРЅС‹ model_path.
-/// Р’СЃСЏ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕСЃС‚СЊ "РїСЂРѕРІРµСЂРєР° -> РІС‹РіСЂСѓР·РєР° -> Р·Р°РіСЂСѓР·РєР° -> Р·Р°РїРёСЃСЊ"
-/// РґРµСЂР¶РёС‚ llm_load_lock: РїР°СЂР°Р»Р»РµР»СЊРЅС‹Рµ Р·Р°РїСЂРѕСЃС‹ РЅРµ РјРѕРіСѓС‚ Р·Р°РіСЂСѓР·РёС‚СЊ РјРѕРґРµР»СЊ
-/// РґРІР°Р¶РґС‹ РёР»Рё СѓРІРёРґРµС‚СЊ РїСЂРѕРјРµР¶СѓС‚РѕС‡РЅРѕРµ None.
+/// Возвращает загруженную модель, при необходимости грузит её в фоне
+/// (лениво на первом вопросе) или перезагружает после смены model_path.
+/// Вся последовательность "проверка -> выгрузка -> загрузка -> запись"
+/// держит llm_load_lock: параллельные запросы не могут загрузить модель
+/// дважды или увидеть промежуточное None.
 async fn ensure_llm(app: &Arc<AppState>, model_path: PathBuf) -> Result<Arc<Inference>, String> {
-    // Pre-flight (L5, С€Р°Рі 6): Р±РµР· NVIDIA-РґСЂР°Р№РІРµСЂР° РЅРµ РїС‹С‚Р°РµРјСЃСЏ РіСЂСѓР·РёС‚СЊ
-    // РјРѕРґРµР»СЊ СЃ РїРѕР»РЅС‹Рј GPU-РѕС„С„Р»РѕР°РґРѕРј вЂ” С‡РµСЃС‚РЅР°СЏ РѕС€РёР±РєР° СЃ СЃСЃС‹Р»РєРѕР№ РЅР° РґСЂР°Р№РІРµСЂ.
+    // Pre-flight (L5, шаг 6): без NVIDIA-драйвера не пытаемся грузить
+    // модель с полным GPU-оффлоадом — честная ошибка с ссылкой на драйвер.
     if !app.gpu_ready.load(Ordering::SeqCst) {
         return Err(
-            "NVIDIA-РґСЂР°Р№РІРµСЂ РЅРµ РЅР°Р№РґРµРЅ (nvcuda.dll РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚). РРЅС„РµСЂРµРЅСЃ С‚СЂРµР±СѓРµС‚ \
-             GPU: СѓСЃС‚Р°РЅРѕРІРёС‚Рµ РґСЂР°Р№РІРµСЂ СЃ https://www.nvidia.com/drivers Рё \
-             РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚Рµ РїСЂРёР»РѕР¶РµРЅРёРµ."
+            "NVIDIA-драйвер не найден (nvcuda.dll отсутствует). Рнференс требует \
+             GPU: установите драйвер с https://www.nvidia.com/drivers и \
+             перезапустите приложение."
                 .into(),
         );
     }
@@ -348,9 +348,9 @@ async fn ensure_llm(app: &Arc<AppState>, model_path: PathBuf) -> Result<Arc<Infe
             }
         }
     }
-    // РЎРјРµРЅР° РјРѕРґРµР»Рё: СЃР±СЂР°СЃС‹РІР°РµРј РїСЂРµР¶РЅРёР№ РґРІРёР¶РѕРє Рё РіСЂСѓР·РёРј РЅРѕРІС‹Р№. In-flight
-    // Р·Р°РїСЂРѕСЃС‹ РґРµСЂР¶Р°С‚ СЃРѕР±СЃС‚РІРµРЅРЅС‹Р№ Arc СЃС‚Р°СЂРѕР№ РјРѕРґРµР»Рё Рё С‡РµСЃС‚РЅРѕ РґРѕСЃС‡РёС‚С‹РІР°СЋС‚ РЅР°
-    // РЅРµР№; РЅРѕРІС‹Рµ Р·Р°РїСЂРѕСЃС‹ РїРѕР»СѓС‡Р°С‚ СѓР¶Рµ РЅРѕРІСѓСЋ.
+    // Смена модели: сбрасываем прежний движок и грузим новый. In-flight
+    // запросы держат собственный Arc старой модели и честно досчитывают на
+    // ней; новые запросы получат уже новую.
     *app.llm.lock() = None;
     let path_str = model_path.to_string_lossy().into_owned();
     let backend = app.backend.clone();
@@ -358,17 +358,17 @@ async fn ensure_llm(app: &Arc<AppState>, model_path: PathBuf) -> Result<Arc<Infe
         mentor_core::inference::load_model(&path_str, &backend)
     })
     .await
-    .map_err(|e| format!("РїРѕС‚РѕРє Р·Р°РіСЂСѓР·РєРё РјРѕРґРµР»Рё: {e}"))?
-    .map_err(|e| format!("Р·Р°РіСЂСѓР·РєР° РјРѕРґРµР»Рё: {e:#}"))?;
+    .map_err(|e| format!("поток загрузки модели: {e}"))?
+    .map_err(|e| format!("загрузка модели: {e:#}"))?;
     let arc = Arc::new(inf);
     *app.llm.lock() = Some((model_path, arc.clone()));
     Ok(arc)
 }
 
-/// Р’РѕРїСЂРѕСЃ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ -> РєРѕРЅС‚РµРєСЃС‚ РёР· Р±Р°Р·С‹ -> РѕС‚РІРµС‚ СЂРµР°Р»СЊРЅРѕР№ LLM.
-/// Р“РµРЅРµСЂР°С†РёСЏ СЃС‚СЂРёРјРёС‚СЃСЏ РІРѕ С„СЂРѕРЅС‚РµРЅРґ СЃРѕР±С‹С‚РёСЏРјРё "gen-token" (РїРѕ РєСѓСЃРєСѓ РЅР° С‚РѕРєРµРЅ,
-/// СЂР°Р·РјРµС‡РµРЅРЅС‹Р№ thinking/answer); РїР°СЂР°Р»Р»РµР»СЊРЅРѕ РєРѕРїРёС‚СЃСЏ СЃРЅРёРјРѕРє gen_stream РґР»СЏ
-/// РѕРїСЂРѕСЃР° РєР°Рє Р·Р°РїР°СЃРЅРѕРіРѕ РєР°РЅР°Р»Р° вЂ” С‚РѕС‚ Р¶Рµ РїР°С‚С‚РµСЂРЅ, С‡С‚Рѕ Сѓ download-progress.
+/// Вопрос пользователя -> контекст из базы -> ответ реальной LLM.
+/// Генерация стримится во фронтенд событиями "gen-token" (по куску на токен,
+/// размеченный thinking/answer); параллельно копится снимок gen_stream для
+/// опроса как запасного канала — тот же паттерн, что у download-progress.
 #[tauri::command]
 async fn send_message(
     app_handle: AppHandle,
@@ -376,32 +376,32 @@ async fn send_message(
     question: String,
 ) -> Result<ChatReply, String> {
     if question.trim().is_empty() {
-        return Err("РїСѓСЃС‚РѕР№ РІРѕРїСЂРѕСЃ".into());
+        return Err("пустой вопрос".into());
     }
     let app = state.inner().clone();
     let cfg = app.cfg.lock().clone();
     if !cfg.model_ready() {
         return Err(
-            "РјРѕРґРµР»СЊ РЅРµ РїРѕРґРєР»СЋС‡РµРЅР°: СѓРєР°Р¶Рё .gguf РІСЂСѓС‡РЅСѓСЋ РёР»Рё СЃРєР°С‡Р°Р№ РЅР° СЃС‚Р°СЂС‚РѕРІРѕРј СЌРєСЂР°РЅРµ".into(),
+            "модель не подключена: укажи .gguf вручную или скачай на стартовом экране".into(),
         );
     }
     let llm = ensure_llm(&app, cfg.model_file_path()).await?;
 
-    // 1. СЂРµС‚СЂРёРІ
+    // 1. ретрив
     let mut rag = app.rag.lock().await;
     let k = cfg.qdrant.top_k as usize;
     let hits = rag
         .search(&question, k)
         .await
-        .map_err(|e| format!("РїРѕРёСЃРє РїРѕ Р±Р°Р·Рµ Р·РЅР°РЅРёР№: {e:#}"))?;
-    // Р“РµРЅРµСЂР°С†РёСЏ РјРѕР¶РµС‚ Р·Р°РЅРёРјР°С‚СЊ СЃРµРєСѓРЅРґС‹ вЂ” РЅРµ РґРµСЂР¶РёРј RAG-РјСЊСЋС‚РµРєСЃ.
+        .map_err(|e| format!("поиск по базе знаний: {e:#}"))?;
+    // Генерация может занимать секунды — не держим RAG-мьютекс.
     drop(rag);
 
-    // 2. РєРѕРЅС‚РµРєСЃС‚ РґР»СЏ РїСЂРѕРјРїС‚Р° (РµРґРёРЅС‹Р№ С„РѕСЂРјР°С‚С‚РµСЂ вЂ” СЌС‚Р°Рї K)
+    // 2. контекст для промпта (единый форматтер — этап K)
     let context = format_context(&hits);
 
-    // 3. СЂРµР°Р»СЊРЅС‹Р№ РёРЅС„РµСЂРµРЅСЃ РІРЅРµ async-РїРѕС‚РѕРєРѕРІ (Р±Р»РѕРєРёСЂСѓСЋС‰Р°СЏ CPU-СЂР°Р±РѕС‚Р°);
-    //    РєР°Р¶РґС‹Р№ С‚РѕРєРµРЅ СѓС…РѕРґРёС‚ РІРѕ РІРµР±РІСЊСЋ СЃРѕР±С‹С‚РёРµРј Рё РІ СЃРЅРёРјРѕРє РґР»СЏ РѕРїСЂРѕСЃР°.
+    // 3. реальный инференс вне async-потоков (блокирующая CPU-работа);
+    //    каждый токен уходит во вебвью событием и в снимок для опроса.
     {
         let mut snap = app.gen_stream.lock();
         snap.thinking.clear();
@@ -434,8 +434,8 @@ async fn send_message(
         })
     })
     .await
-    .map_err(|e| format!("РїРѕС‚РѕРє РёРЅС„РµСЂРµРЅСЃР°: {e}"))?
-    .map_err(|e| format!("РёРЅС„РµСЂРµРЅСЃ: {e:#}"))?;
+    .map_err(|e| format!("поток инференса: {e}"))?
+    .map_err(|e| format!("инференс: {e:#}"))?;
     {
         let mut snap = app.gen_stream.lock();
         snap.done = true;
@@ -449,7 +449,7 @@ async fn send_message(
     })
 }
 
-/// РЎР»СѓР¶РµР±РЅР°СЏ РёРЅС„РѕСЂРјР°С†РёСЏ РґР»СЏ СЃС‚Р°С‚СѓСЃ-Р±Р°СЂР° С„СЂРѕРЅС‚РµРЅРґР°.
+/// Служебная информация для статус-бара фронтенда.
 #[tauri::command]
 async fn get_status(state: State<'_, Arc<AppState>>) -> Result<StatusInfo, String> {
     let app = state.inner().clone();
@@ -473,14 +473,14 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> Result<StatusInfo, Strin
     })
 }
 
-/// РџСЂРѕРІРµСЂРєР° РјРѕРґРµР»Рё РґР»СЏ СЂРµС€РµРЅРёСЏ "С‡Р°С‚ РёР»Рё СЌРєСЂР°РЅ РЅР°СЃС‚СЂРѕР№РєРё".
+/// Проверка модели для решения "чат или экран настройки".
 #[tauri::command]
 async fn get_model_status(state: State<'_, Arc<AppState>>) -> Result<ModelStatus, String> {
     read_model_status(&state.inner().cfg_path)
 }
 
-/// РџРѕСЃР»РµРґРЅРёР№ СЃРЅРёРјРѕРє РїСЂРѕРіСЂРµСЃСЃР° Р·Р°РіСЂСѓР·РєРё (С„СЂРѕРЅС‚РµРЅРґ РѕРїСЂР°С€РёРІР°РµС‚ РєР°Рє Р·Р°РїР°СЃРЅРѕР№
-/// РєР°РЅР°Р», РµСЃР»Рё СЃРѕР±С‹С‚РёСЏ РЅРµ РґРѕС…РѕРґСЏС‚).
+/// Последний снимок прогресса загрузки (фронтенд опрашивает как запасной
+/// канал, если события не доходят).
 #[tauri::command]
 async fn get_download_progress(
     state: State<'_, Arc<AppState>>,
@@ -488,42 +488,42 @@ async fn get_download_progress(
     Ok(state.inner().download_progress.lock().clone())
 }
 
-/// РЎРЅРёРјРѕРє РЅР°РєРѕРїР»РµРЅРЅРѕРіРѕ СЃС‚СЂРёРјР° РіРµРЅРµСЂР°С†РёРё (Р·Р°РїР°СЃРЅРѕР№ РєР°РЅР°Р» Рє СЃРѕР±С‹С‚РёСЏРј
-/// "gen-token", РµСЃР»Рё РѕРЅРё РЅРµ РґРѕС…РѕРґСЏС‚ РґРѕ РІРµР±РІСЊСЋ). РђР±СЃРѕР»СЋС‚РЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ вЂ”
-/// С„СЂРѕРЅС‚ СЃРІРµСЂСЏРµС‚ РґР»РёРЅС‹ Рё РґРѕР·Р°Р±РёСЂР°РµС‚ РЅРµРґРѕСЃС‚Р°СЋС‰РµРµ.
+/// Снимок накопленного стрима генерации (запасной канал к событиям
+/// "gen-token", если они не доходят до вебвью). Абсолютные значения —
+/// фронт сверяет длины и дозабирает недостающее.
 #[tauri::command]
 async fn get_gen_progress(state: State<'_, Arc<AppState>>) -> Result<GenStreamSnapshot, String> {
     Ok(state.inner().gen_stream.lock().clone())
 }
 
-/// Р”РёР°Р»РѕРі РІС‹Р±РѕСЂР° РіРѕС‚РѕРІРѕРіРѕ .gguf; РїСѓС‚СЊ СЃРѕС…СЂР°РЅСЏРµС‚СЃСЏ РІ config.toml.
-/// Р’РѕР·РІСЂР°С‰Р°РµС‚ None, РµСЃР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ Р·Р°РєСЂС‹Р» РґРёР°Р»РѕРі Р±РµР· РІС‹Р±РѕСЂР°.
+/// Диалог выбора готового .gguf; путь сохраняется в config.toml.
+/// Возвращает None, если пользователь закрыл диалог без выбора.
 #[tauri::command]
 async fn pick_model_file(state: State<'_, Arc<AppState>>) -> Result<Option<ModelStatus>, String> {
     let app = state.inner().clone();
     let picked = tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("Р’С‹Р±РµСЂРё GGUF-С„Р°Р№Р» РјРѕРґРµР»Рё")
-            .add_filter("GGUF-РјРѕРґРµР»Рё", &["gguf"])
-            .add_filter("Р’СЃРµ С„Р°Р№Р»С‹", &["*"])
+            .set_title("Выбери GGUF-файл модели")
+            .add_filter("GGUF-модели", &["gguf"])
+            .add_filter("Все файлы", &["*"])
             .pick_file()
     })
     .await
-    .map_err(|e| format!("РїРѕС‚РѕРє РґРёР°Р»РѕРіР°: {e}"))?;
+    .map_err(|e| format!("поток диалога: {e}"))?;
 
     let Some(path) = picked else {
-        return Ok(None); // РґРёР°Р»РѕРі Р·Р°РєСЂС‹С‚ вЂ” РЅРµ РѕС€РёР±РєР°
+        return Ok(None); // диалог закрыт — не ошибка
     };
     let path_str = path.to_string_lossy().into_owned();
     save_string_field(&app.cfg_path, "model_path", &path_str)
-        .map_err(|e| format!("Р·Р°РїРёСЃСЊ config.toml: {e:#}"))?;
+        .map_err(|e| format!("запись config.toml: {e:#}"))?;
     reload_cfg_preserving_port(&app)?;
     Ok(Some(read_model_status(&app.cfg_path)?))
 }
 
-/// Р¤РѕРЅРѕРІР°СЏ Р·Р°РґР°С‡Р° СЃРєР°С‡РёРІР°РЅРёСЏ: СЃРѕР±С‹С‚РёСЏ РїСЂРѕРіСЂРµСЃСЃР° РІ РєР°РЅР°Р» "download-progress",
-/// РїРѕ СѓСЃРїРµС…Рµ РїСѓС‚СЊ СЃРѕС…СЂР°РЅСЏРµС‚СЃСЏ РІ config.toml. РЎРёРіРЅР°Р» done С€Р»С‘С‚СЃСЏ С‚РѕР»СЊРєРѕ
-/// РїРѕСЃР»Рµ Р·Р°РїРёСЃРё РєРѕРЅС„РёРіР°, С‡С‚РѕР±С‹ С„СЂРѕРЅС‚РµРЅРґ РЅРµ СѓРІРёРґРµР» РїСЂРѕРјРµР¶СѓС‚РѕС‡РЅРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ.
+/// Фоновая задача скачивания: события прогресса в канал "download-progress",
+/// по успехе путь сохраняется в config.toml. Сигнал done шлётся только
+/// после записи конфига, чтобы фронтенд не увидел промежуточное состояние.
 async fn run_download(
     app_handle: AppHandle,
     app: Arc<AppState>,
@@ -541,7 +541,7 @@ async fn run_download(
         dest,
     };
 
-    let downloader = Downloader::new().map_err(|e| format!("HTTP-РєР»РёРµРЅС‚: {e:#}"))?;
+    let downloader = Downloader::new().map_err(|e| format!("HTTP-клиент: {e:#}"))?;
     let snapshot = app.clone();
     let emit_handle = app_handle.clone();
     let result = downloader
@@ -588,12 +588,12 @@ async fn run_download(
             };
             *app.download_progress.lock() = Some(err_event.clone());
             let _ = app_handle.emit("download-progress", err_event);
-            Err(String::from("Р·Р°РіСЂСѓР·РєР° РЅРµ Р·Р°РІРµСЂС€РµРЅР°"))
+            Err(String::from("загрузка не завершена"))
         }
     }
 }
 
-/// РЎС‚Р°СЂС‚ СЃРєР°С‡РёРІР°РЅРёСЏ РјРѕРґРµР»Рё РїРѕ URL РёР· config.toml (model_download_url).
+/// Старт скачивания модели по URL из config.toml (model_download_url).
 #[tauri::command]
 async fn start_model_download(
     app_handle: AppHandle,
@@ -601,9 +601,9 @@ async fn start_model_download(
 ) -> Result<(), String> {
     let app = state.inner().clone();
     if app.download_active.swap(true, Ordering::SeqCst) {
-        return Err("Р·Р°РіСЂСѓР·РєР° СѓР¶Рµ РёРґС‘С‚".into());
+        return Err("загрузка уже идёт".into());
     }
-    // РЎРІРµР¶РёР№ РєРѕРЅС„РёРі СЃ РґРёСЃРєР°: URL РјРѕРіР»Рё С‚РѕР»СЊРєРѕ С‡С‚Рѕ РѕС‚СЂРµРґР°РєС‚РёСЂРѕРІР°С‚СЊ.
+    // Свежий конфиг с диска: URL могли только что отредактировать.
     let cfg = AppConfig::load(&app.cfg_path).map_err(|e| {
         app.download_active.store(false, Ordering::SeqCst);
         format!("config.toml: {e:#}")
@@ -612,10 +612,10 @@ async fn start_model_download(
     if url.is_empty() {
         app.download_active.store(false, Ordering::SeqCst);
         return Err(
-            "model_download_url РІ config.toml РїСѓСЃС‚ вЂ” Р·Р°РїРѕР»РЅРё РµРіРѕ СЂРµР°Р»СЊРЅС‹Рј Р°РґСЂРµСЃРѕРј .gguf".into(),
+            "model_download_url в config.toml пуст — заполни его реальным адресом .gguf".into(),
         );
     }
-    // РќРѕРІС‹Р№ С‚РѕРєРµРЅ РѕС‚РјРµРЅС‹ РЅР° РєР°Р¶РґСѓСЋ Р·Р°РіСЂСѓР·РєСѓ (РїСЂРѕС€Р»Р°СЏ РѕС‚РјРµРЅР° РЅРµ В«РІРёСЃРёС‚В»).
+    // Новый токен отмены на каждую загрузку (прошлая отмена не «висит»).
     let cancel = CancelToken::new();
     *app.download_cancel.lock() = cancel.clone();
     *app.download_progress.lock() = None;
@@ -630,20 +630,20 @@ async fn start_model_download(
     Ok(())
 }
 
-/// РћС‚РјРµРЅР° Р°РєС‚РёРІРЅРѕР№ Р·Р°РіСЂСѓР·РєРё (.part СЃРѕС…СЂР°РЅСЏРµС‚СЃСЏ вЂ” СЃР»РµРґСѓСЋС‰РёР№ Р·Р°РїСѓСЃРє РґРѕРєР°С‡Р°РµС‚).
+/// Отмена активной загрузки (.part сохраняется — следующий запуск докачает).
 #[tauri::command]
 async fn cancel_model_download(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.inner().download_cancel.lock().cancel();
     Ok(())
 }
 
-/// РЎРЅРёРјРѕРє РЅР°СЃС‚СЂРѕРµРє РіРµРЅРµСЂР°С†РёРё РґР»СЏ РѕРєРЅР° РЅР°СЃС‚СЂРѕРµРє С„СЂРѕРЅС‚РµРЅРґР°.
+/// Снимок настроек генерации для окна настроек фронтенда.
 #[derive(Serialize)]
 pub struct SettingsInfo {
-    /// РџСѓС‚СЊ Рє .gguf РёР· config.toml (РјРѕР¶РµС‚ Р±С‹С‚СЊ РїСѓСЃС‚).
+    /// Путь к .gguf из config.toml (может быть пуст).
     pub model_path: String,
-    /// РћС‚РѕР±СЂР°Р¶Р°РµРјРѕРµ РёРјСЏ РёР· GGUF-РјРµС‚Р°РґР°РЅРЅС‹С… (general.name); РµСЃР»Рё РјРµС‚Р°РґР°РЅРЅС‹С…
-    /// РЅРµС‚ вЂ” РёРјСЏ С„Р°Р№Р»Р°; РµСЃР»Рё С„Р°Р№Р»Р° РЅРµС‚ вЂ” РїСѓСЃС‚Р°СЏ СЃС‚СЂРѕРєР°.
+    /// Отображаемое имя из GGUF-метаданных (general.name); если метаданных
+    /// нет — имя файла; если файла нет — пустая строка.
     pub model_name: String,
     pub temperature: f32,
     pub max_tokens: u32,
@@ -671,14 +671,14 @@ fn read_settings(cfg_path: &std::path::Path) -> Result<SettingsInfo, String> {
     })
 }
 
-/// РўРµРєСѓС‰РёРµ РЅР°СЃС‚СЂРѕР№РєРё: РїСѓС‚СЊ/РёРјСЏ РјРѕРґРµР»Рё + РїР°СЂР°РјРµС‚СЂС‹ [generation].
+/// Текущие настройки: путь/имя модели + параметры [generation].
 #[tauri::command]
 async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsInfo, String> {
     read_settings(&state.inner().cfg_path)
 }
 
-/// РЎРѕС…СЂР°РЅСЏРµС‚ temperature/max_tokens РІ config.toml (СЃ СЃРѕС…СЂР°РЅРµРЅРёРµРј РєРѕРјРјРµРЅС‚Р°СЂРёРµРІ)
-/// Рё РѕР±РЅРѕРІР»СЏРµС‚ РєРѕРЅС„РёРі РІ СЃРѕСЃС‚РѕСЏРЅРёРё. Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРІРµР¶РёР№ СЃРЅРёРјРѕРє РЅР°СЃС‚СЂРѕРµРє.
+/// Сохраняет temperature/max_tokens в config.toml (с сохранением комментариев)
+/// и обновляет конфиг в состоянии. Возвращает свежий снимок настроек.
 #[tauri::command]
 async fn set_settings(
     state: State<'_, Arc<AppState>>,
@@ -686,10 +686,10 @@ async fn set_settings(
     max_tokens: u32,
 ) -> Result<SettingsInfo, String> {
     if !(0.0..=2.0).contains(&temperature) {
-        return Err("temperature РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РІ РґРёР°РїР°Р·РѕРЅРµ 0.0вЂ“2.0".into());
+        return Err("temperature должен быть в диапазоне 0.0–2.0".into());
     }
     if !(128..=32768).contains(&max_tokens) {
-        return Err("max_tokens РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РІ РґРёР°РїР°Р·РѕРЅРµ 128вЂ“32768".into());
+        return Err("max_tokens должен быть в диапазоне 128–32768".into());
     }
     let app = state.inner().clone();
     let cfg_path = app.cfg_path.clone();
@@ -697,31 +697,31 @@ async fn set_settings(
         save_generation_fields(&cfg_path, temperature, max_tokens)
     })
     .await
-    .map_err(|e| format!("РїРѕС‚РѕРє Р·Р°РїРёСЃРё РєРѕРЅС„РёРіР°: {e}"))?
-    .map_err(|e| format!("Р·Р°РїРёСЃСЊ config.toml: {e:#}"))?;
+    .map_err(|e| format!("поток записи конфига: {e}"))?
+    .map_err(|e| format!("запись config.toml: {e:#}"))?;
     reload_cfg_preserving_port(&app)?;
     read_settings(&app.cfg_path)
 }
 
 pub fn run() {
-    // РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ (РїРµСЂРІС‹Р№ Р·Р°РїСѓСЃРє, Qdrant sidecar, RAG, РјРѕРґРµР»СЊ) РґРѕ СЃС‚Р°СЂС‚Р°
-    // event loop: РѕРєРЅР° РµС‰С‘ РЅРµС‚, Р·Р°РјРµСЂР·Р°С‚СЊ РЅРµС‡РµРјСѓ; РѕС€РёР±РєРё РїРѕРєР°Р·С‹РІР°СЋС‚СЃСЏ
-    // РїРѕРЅСЏС‚РЅС‹Рј РґРёР°Р»РѕРіРѕРј вЂ” РЅРµ РјРѕР»С‡Р° (L5, С€Р°Рі 4).
+    // Рнициализация (первый запуск, Qdrant sidecar, RAG, модель) до старта
+    // event loop: окна ещё нет, замерзать нечему; ошибки показываются
+    // понятным диалогом — не молча (L5, шаг 4).
     let state = match tauri::async_runtime::block_on(init_state()) {
         Ok(s) => s,
         Err(e) => {
-            // Р”РёР°РіРЅРѕСЃС‚РёРєР°: С‚РµРєСЃС‚ РѕС€РёР±РєРё РѕСЃС‚Р°С‘С‚СЃСЏ РІ С„Р°Р№Р»Рµ (РІ
-            // windows_subsystem=windows eprintln РЅРµРєСѓРґР° РїРёСЃР°С‚СЊ).
+            // Диагностика: текст ошибки остаётся в файле (в
+            // windows_subsystem=windows eprintln некуда писать).
             let _ = std::fs::write(
                 std::env::temp_dir().join("ai-mentor-init-error.log"),
                 format!("{e}\n"),
             );
             let description = format!(
-                "РќРµ СѓРґР°Р»РѕСЃСЊ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°С‚СЊ РїСЂРёР»РѕР¶РµРЅРёРµ:\n\n{e}\n\n\
-                 РџСЂРёР»РѕР¶РµРЅРёРµ Р±СѓРґРµС‚ Р·Р°РєСЂС‹С‚Рѕ."
+                "Не удалось инициализировать приложение:\n\n{e}\n\n\
+                 Приложение будет закрыто."
             );
             rfd::MessageDialog::new()
-                .set_title("AI Mentor вЂ” РѕС€РёР±РєР° Р·Р°РїСѓСЃРєР°")
+                .set_title("AI Mentor — ошибка запуска")
                 .set_description(&description)
                 .set_buttons(rfd::MessageButtons::Ok)
                 .set_level(rfd::MessageLevel::Error)
@@ -732,11 +732,11 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Arc::new(state))
         .setup(|app| {
-            // РћРєРЅРѕ СЃРѕР·РґР°С‘Рј С‚РѕР»СЊРєРѕ РєРѕРіРґР° СЃРµСЂРІРёСЃС‹ РіРѕС‚РѕРІС‹.
+            // Окно создаём только когда сервисы готовы.
             use tauri::webview::WebviewWindowBuilder;
             use tauri::WebviewUrl;
             WebviewWindowBuilder::new(app.handle(), "main", WebviewUrl::default())
-                .title("AI Mentor вЂ” Р»РѕРєР°Р»СЊРЅС‹Р№ РЅР°СЃС‚Р°РІРЅРёРє")
+                .title("AI Mentor — локальный наставник")
                 .inner_size(1180.0, 780.0)
                 .min_inner_size(720.0, 540.0)
                 .build()?;
@@ -755,10 +755,10 @@ pub fn run() {
             set_settings
         ])
         .build(tauri::generate_context!())
-        .expect("РѕС€РёР±РєР° СЃР±РѕСЂРєРё Tauri-РїСЂРёР»РѕР¶РµРЅРёСЏ")
+        .expect("ошибка сборки Tauri-приложения")
         .run(|app_handle, event| {
-            // РћР‘РЇР—РђРўР•Р›Р¬РќРћ (L5, С€Р°Рі 4): РїСЂРё РІС‹С…РѕРґРµ РѕСЃС‚Р°РЅР°РІР»РёРІР°РµРј sidecar
-            // РїСЂРѕС†РµСЃСЃС‹, РёРЅР°С‡Рµ qdrant.exe РѕСЃС‚Р°РЅРµС‚СЃСЏ РІРёСЃРµС‚СЊ РїРѕСЃР»Рµ Р·Р°РєСЂС‹С‚РёСЏ РѕРєРЅР°.
+            // ОБЯЗАТЕЛЬНО (L5, шаг 4): при выходе останавливаем sidecar
+            // процессы, иначе qdrant.exe останется висеть после закрытия окна.
             if let tauri::RunEvent::Exit = event {
                 let state: State<Arc<AppState>> = app_handle.state();
                 qdrant::stop_qdrant(&state.qdrant);
