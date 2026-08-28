@@ -1,4 +1,4 @@
-﻿# РђСЂС‚РµС„Р°РєС‚С‹ СЃР±РѕСЂРєРё
+﻿# Build artifacts
 target/
 node_modules/
 dist/
@@ -7,7 +7,7 @@ dist/
 .venv/
 __pycache__/
 
-# РљСЂСѓРїРЅС‹Рµ Р±РёРЅР°СЂРЅС‹Рµ Р°СЃСЃРµС‚С‹ Рё РјРѕРґРµР»Рё
+# Large binaries and models
 *.gguf
 *.msi
 *.exe
@@ -16,28 +16,27 @@ tools_bin/
 .models/
 .data/
 
-# РЎРєСЂРёРЅС€РѕС‚С‹ РґР»СЏ РѕС‚Р»Р°РґРєРё / СЂРµС„РµСЂРµРЅСЃС‹
+# Debug screenshots / references
 reference/
 logs/screenshots/
 logs/*.png
 
-# РЎРµРєСЂРµС‚С‹ Рё РєР»СЋС‡Рё
+# Secrets and keys
 .env
 .env.*
 *.key
 *.pem
 *.pfx
 
-# Р›РѕРєР°Р»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ Рё СЃРµСЃСЃРёРё
+# Local data and sessions
 session-*.md
 .claude/
 
-# Р’РЅСѓС‚СЂРµРЅРЅРёРµ СЂР°Р±РѕС‡РёРµ Р°СЂС‚РµС„Р°РєС‚С‹ СЂР°Р·СЂР°Р±РѕС‚РєРё (РЅРµ РґР»СЏ РїСѓР±Р»РёС‡РЅРѕРіРѕ СЂРµР»РёР·Р°)
+# Internal dev artifacts (not for the public repo)
 logs/
 manifest*.json
 task*.md
 audit-v4/
-reference/
 *.audit-k3/
 build_log.md
 ai_mentor.html
@@ -47,8 +46,9 @@ package.json
 package-lock.json
 scripts/
 tools_migrate/
+conc.md
 
-# L5: Р±РёРЅР°СЂРЅС‹Рµ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё Р±Р°РЅРґР»Р° вЂ” СЃРєР°С‡РёРІР°СЋС‚СЃСЏ build.rs, РІ git РќР• С…СЂР°РЅСЏС‚СЃСЏ
+# L5: bundled binary deps are fetched by build.rs, never stored in git
 src-tauri/resources/cudart64_12.dll
 src-tauri/resources/cublas64_12.dll
 src-tauri/resources/cublasLt64_12.dll
@@ -61,4 +61,3 @@ src-tauri/resources/defaults/config.toml
 src-tauri/binaries/
 target/deps_cache/
 .qdrant-initialized
-conc.md
