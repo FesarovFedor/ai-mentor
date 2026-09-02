@@ -61,7 +61,8 @@ frontend/                   статические HTML/CSS/JS, терминал
   `textContent`/`createTextNode`. Модельный текст (thinking, answer) —
   Markdown-пайплайн: `markdown-it` (html:false, breaks:true) +
   `DOMPurify.sanitize` → `innerHTML`. Это единственная точка HTML-вставки.
-  Локальные копии библиотек в `frontend/vendor/` (CSP `default-src 'self'`).
+  Локальные копии библиотек в `frontend/vendor/` (CSP `default-src 'self'`,
+  после аудита k3 усилен: `object-src 'none'; base-uri 'none'; frame-ancestors 'none'`).
 
 ## Решения, принятые в L3–L5
 

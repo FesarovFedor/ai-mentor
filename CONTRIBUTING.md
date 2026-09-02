@@ -22,11 +22,27 @@ Runtime, qdrant.exe) с официальных источников, прове�
 в `src-tauri/resources/` и `src-tauri/binaries/`. Кэш — `target/deps_cache/`,
 повторные сборки ничего не качают.
 
-Данные базы знаний (векторный стор и тексты чанков) в git не хранятся:
-build.rs копирует их из локального дерева (`tools_bin/qdrant_server/storage`,
-`../kb_chunks`). Для сборки без них задайте пустые каталоги через env
-`QDRANT_STORAGE_SRC` / `KB_CHUNKS_SRC` — приложение соберётся, но RAG
-потребует собственной базы.
+### libclang (bindgen для llama-cpp-sys-2)
+
+`llama-cpp-sys-2` генерирует биндинги через bindgen, которому нужен libclang.
+Файл `.cargo/config.toml` (машинно-специфичный путь) не хранится в git —
+скопируйте шаблон и укажите свой путь:
+
+```powershell
+Copy-Item .cargo/config.toml.example .cargo/config.toml
+# затем пропишите LIBCLANG_PATH на каталог bin/ вашего libclang.dll
+```
+
+Варианты: portable LLVM (распакованный релиз llvm-project) или системная
+установка LLVM; если libclang доступен в PATH, секцию `[env]` можно опустить.
+
+Данные базы знаний (векторный стор, тексты чанков и кэш embedding-модели
+fastembed) в git не хранятся: build.rs копирует их из локального дерева
+(`tools_bin/qdrant_server/storage`, `../kb_chunks`, `.models/fastembed`).
+Для сборки без них задайте пути (или пустые каталоги) через env
+`QDRANT_STORAGE_SRC` / `KB_CHUNKS_SRC` / `FASTEMBED_SRC` — приложение
+соберётся, но RAG потребует собственной базы, а embedding-модель
+(~465 МБ) будет скачана с HuggingFace при первом запуске.
 
 ## Запуск в dev-режиме
 
@@ -37,6 +53,7 @@ cargo tauri dev
 ## Тесты
 
 ```powershell
+cargo test --workspace   # unit-тесты чистых функций ядра
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo run --bin retrieval_test   # требует запущенный Qdrant

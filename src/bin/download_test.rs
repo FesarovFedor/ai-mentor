@@ -6,7 +6,7 @@
 //! stop_after_mb > 0 — имитация обрыва: как только скачано указанное число
 //! МиБ, процесс отменяет загрузку и завершается, оставляя .part на диске.
 //! Следующий запуск без этого аргумента продолжает с того же места.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,10 +14,8 @@ use std::time::{Duration, Instant};
 
 use mentor_core::config::AppConfig;
 use mentor_core::downloader::{CancelToken, DownloadSpec, Downloader};
-
-fn default_config_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml")
-}
+// F-016: общая утилита вместо локального дубликата (как в gen_bench/inference_smoke).
+use mentor_core::rag::default_config_path;
 
 #[tokio::main]
 async fn main() -> ExitCode {

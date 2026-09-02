@@ -22,7 +22,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use mentor_core::config::{save_generation_fields, save_string_field, AppConfig};
 use mentor_core::downloader::{filename_from_url, CancelToken, DownloadSpec, Downloader};
-use mentor_core::generator::{generate_response_streaming, StreamKind};
+use mentor_core::generator::{generate_response_streaming, HistoryTurn, StreamKind};
 use mentor_core::inference::{gguf_display_name, Inference, LlamaBackend};
 use mentor_core::rag::{format_context, Rag, SearchHit};
 
@@ -33,7 +33,12 @@ use mentor_core::rag::{format_context, Rag, SearchHit};
 /// дропается вместе с AppState при завершении приложения (RunEvent::Exit) —
 /// CUDA-контекст освобождает VRAM (фикс P0 утечки из аудита, этап L4).
 pub struct AppState {
-    pub backend: Arc<LlamaBackend>,
+    /// LlamaBackend (единственная точка init_backend()). Option из-за F-025:
+    /// на машине без NVIDIA-драйвера бэкенд не инициализируется вовсе —
+    /// иначе CUDA-инициализация падает раньше дружелюбного сообщения о
+    /// драйвере. None -> инференс блокируется (ensure_llm), RAG/скачивание
+    /// работают.
+    pub backend: Option<Arc<LlamaBackend>>,
     /// RAG держится через .await (поиск по Qdrant) — AsyncMutex.
     pub rag: AsyncMutex<Rag>,
     /// Конфиг под мьютексом: обновляется после выбора/скачивания модели.
@@ -60,6 +65,13 @@ pub struct AppState {
     /// тот же запасной канал, что у download_progress. Абсолютные значения:
     /// фронт сверяет длины и дозабирает недостающее.
     pub gen_stream: Mutex<GenStreamSnapshot>,
+    /// Флаг отмены активной генерации (F-002, аналог CancelToken для
+    /// скачивания): проверяется в колбэке каждого токена.
+    pub gen_cancel: AtomicBool,
+    /// Причина неудачной предзагрузки модели (F-004): без этого текст уходил
+    /// только в eprintln, которого в release-сборке не видно, и пользователь
+    /// узнавал причину лишь при первой отправке сообщения.
+    pub llm_error: Mutex<Option<String>>,
     /// Дочерний процесс Qdrant sidecar: останавливается в RunEvent::Exit.
     pub qdrant: qdrant::QdrantProc,
     /// Pre-flight (Этап L5, шаг 6): есть ли NVIDIA-драйвер в системе.
@@ -88,7 +100,13 @@ pub struct StatusInfo {
     pub top_k: u32,
     pub embedding_model: String,
     pub model_path_set: bool,
-    pub generator_stub: bool,
+    /// true — реальная LLM загружена (переименование F-018: старое имя
+    /// generator_stub осталось с этапа заглушки и было семантически
+    /// инвертировано).
+    pub llm_loaded: bool,
+    /// Причина, по которой модель не загрузилась (F-004): ошибка предзагрузки
+    /// из init_state; None — если предзагрузка не проводилась/прошла успешно.
+    pub llm_error: Option<String>,
 }
 
 /// Состояние модели для стартового экрана (читает конфиг с диска — всегда свежий).
@@ -132,14 +150,16 @@ pub struct GenStreamSnapshot {
     pub done: bool,
 }
 
-fn read_model_status(cfg_path: &std::path::Path) -> Result<ModelStatus, String> {
-    let cfg = AppConfig::load(cfg_path).map_err(|e| format!("config.toml: {e:#}"))?;
-    Ok(ModelStatus {
+/// Снимок статуса модели из загруженного конфига (F-015: единый источник —
+/// AppState.cfg; перечитывание с диска нужно только после внешней правки
+/// model_download_url, что делает start_model_download/run_download).
+fn model_status_from(cfg: &AppConfig) -> ModelStatus {
+    ModelStatus {
         found: cfg.model_ready(),
         path: cfg.model_file_path().to_string_lossy().into_owned(),
         download_url: cfg.model_download_url.clone(),
         sha256_set: !cfg.model_sha256.trim().is_empty(),
-    })
+    }
 }
 
 /// Каталог пользовательских данных: %APPDATA%\ai-mentor (Этап L5, шаг 7).
@@ -163,12 +183,8 @@ fn provision_first_run(resource_dir: &Path) -> Result<PathBuf, anyhow::Error> {
     let cfg_path = dir.join("config.toml");
     if !cfg_path.exists() {
         let template_path = resource_dir.join("defaults").join("config.toml");
-        let template = fs::read_to_string(&template_path).with_context(|| {
-            format!(
-                "в бандле нет шаблона конфига {}",
-                template_path.display()
-            )
-        })?;
+        let template = fs::read_to_string(&template_path)
+            .with_context(|| format!("в бандле нет шаблона конфига {}", template_path.display()))?;
         // kb_chunks в бандле лежат рядом с config.toml в AppData.
         let rewritten = template.replace("../kb_chunks", "kb_chunks");
         fs::write(&cfg_path, rewritten)
@@ -184,6 +200,13 @@ fn provision_first_run(resource_dir: &Path) -> Result<PathBuf, anyhow::Error> {
         &dir.join("qdrant").join("storage"),
         "векторный стор Qdrant",
     )?;
+    // Кэш embedding-модели (F-026): разворачивается из бандла, чтобы первый
+    // запуск не качал ~465 МБ с HuggingFace (обещание «Zero cloud» в README).
+    copy_missing(
+        &resource_dir.join("fastembed-cache"),
+        &dir.join(".models").join("fastembed"),
+        "кэш embedding-модели fastembed",
+    )?;
     Ok(cfg_path)
 }
 
@@ -194,8 +217,7 @@ fn copy_missing(src: &Path, dst: &Path, what: &str) -> Result<(), anyhow::Error>
     if dst.exists() {
         return Ok(());
     }
-    copy_tree(src, dst)
-        .with_context(|| format!("копирование {what} в {}", dst.display()))
+    copy_tree(src, dst).with_context(|| format!("копирование {what} в {}", dst.display()))
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -235,19 +257,17 @@ pub fn gpu_driver_available() -> bool {
 /// Каталог ресурсов бандла: Tauri кладёт ресурсы (DLL, qdrant-storage,
 /// kb_chunks, defaults/) рядом с основным бинарем — и в MSI, и при dev-запуске.
 fn resource_dir() -> Result<PathBuf, anyhow::Error> {
-    Ok(std::env::current_exe()
-        .context("не удалось определить каталог приложения")?
-        .parent()
-        .expect("exe лежит в каталоге")
-        .to_path_buf())
+    let exe = std::env::current_exe().context("не удалось определить каталог приложения")?;
+    exe.parent()
+        .with_context(|| format!("exe без родительского каталога: {}", exe.display()))
+        .map(Path::to_path_buf)
 }
 
 /// Рнициализация состояния: первый запуск -> Qdrant sidecar -> RAG -> модель.
 /// Вызывается из setup-хука ДО создания окна: пользователь не видит
 /// "зависшего" окна, а любые ошибки показываются диалогом (не молча).
 async fn init_state() -> Result<AppState, String> {
-    let resource_dir =
-        resource_dir().map_err(|e| format!("каталог ресурсов: {e:#}"))?;
+    let resource_dir = resource_dir().map_err(|e| format!("каталог ресурсов: {e:#}"))?;
     // Тяжёлое копирование данных первого запуска (до ~600 МБ стор Qdrant) —
     // в блокирующем пуле, main-поток не занят файловым I/O.
     let res_for_provision = resource_dir.clone();
@@ -260,11 +280,17 @@ async fn init_state() -> Result<AppState, String> {
     let mut cfg = AppConfig::load(&cfg_path).map_err(|e| format!("config.toml: {e:#}"))?;
 
     // Pre-flight драйвера: модель грузим только если есть NVIDIA.
+    // F-025: init_backend вызывается ТОЛЬКО при gpu_ready — CUDA-инициализация
+    // на машине без nvcuda.dll падала бы техническим диалогом раньше
+    // задокументированного дружелюбного сообщения о драйвере.
     let gpu_ready = gpu_driver_available();
-    let backend = Arc::new(
-        mentor_core::inference::init_backend()
-            .map_err(|e| format!("инициализация llama.cpp backend: {e:#}"))?,
-    );
+    let backend = if gpu_ready {
+        Some(Arc::new(mentor_core::inference::init_backend().map_err(
+            |e| format!("инициализация llama.cpp backend: {e:#}"),
+        )?))
+    } else {
+        None
+    };
 
     // Qdrant sidecar: динамический порт + AppData-стор; ждём readiness.
     let qproc = qdrant::QdrantProc::new();
@@ -289,23 +315,29 @@ async fn init_state() -> Result<AppState, String> {
         .await
         .map_err(|e| format!("инициализация RAG: {e:#}"))?;
 
-    let llm = if gpu_ready && cfg.model_ready() {
-        let path_str = cfg.model_file_path().to_string_lossy().into_owned();
-        let backend = backend.clone();
-        match tauri::async_runtime::spawn_blocking(move || {
-            mentor_core::inference::load_model(&path_str, &backend)
-        })
-        .await
-        .map_err(|e| format!("поток предзагрузки модели: {e}"))?
-        {
-            Ok(inf) => Some((cfg.model_file_path(), Arc::new(inf))),
-            Err(e) => {
-                eprintln!("предзагрузка модели не удалась: {e:#}");
-                None // причина увидит пользователь при первой отправке вопроса
+    let mut llm_error: Option<String> = None;
+    let llm = match backend.as_ref() {
+        Some(backend) if cfg.model_ready() => {
+            let path_str = cfg.model_file_path().to_string_lossy().into_owned();
+            let backend = backend.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                mentor_core::inference::load_model(&path_str, &backend)
+            })
+            .await
+            .map_err(|e| format!("поток предзагрузки модели: {e}"))?
+            {
+                Ok(inf) => Some((cfg.model_file_path(), Arc::new(inf))),
+                Err(e) => {
+                    // F-004: причина неудачной предзагрузки должна быть видна
+                    // пользователю сразу (в release eprintln никуда не пишется).
+                    let text = format!("{e:#}");
+                    eprintln!("предзагрузка модели не удалась: {text}");
+                    llm_error = Some(text);
+                    None
+                }
             }
         }
-    } else {
-        None
+        _ => None,
     };
     Ok(AppState {
         backend,
@@ -318,6 +350,8 @@ async fn init_state() -> Result<AppState, String> {
         download_active: AtomicBool::new(false),
         download_progress: Mutex::new(None),
         gen_stream: Mutex::new(GenStreamSnapshot::default()),
+        gen_cancel: AtomicBool::new(false),
+        llm_error: Mutex::new(llm_error),
         qdrant: qproc,
         gpu_ready: AtomicBool::new(gpu_ready),
     })
@@ -353,7 +387,11 @@ async fn ensure_llm(app: &Arc<AppState>, model_path: PathBuf) -> Result<Arc<Infe
     // ней; новые запросы получат уже новую.
     *app.llm.lock() = None;
     let path_str = model_path.to_string_lossy().into_owned();
-    let backend = app.backend.clone();
+    let backend = app.backend.clone().ok_or_else(|| {
+        "llama.cpp backend не инициализирован: нет NVIDIA-драйвера \
+         (см. https://www.nvidia.com/drivers)"
+            .to_string()
+    })?;
     let inf = tauri::async_runtime::spawn_blocking(move || {
         mentor_core::inference::load_model(&path_str, &backend)
     })
@@ -374,6 +412,7 @@ async fn send_message(
     app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     question: String,
+    history: Option<Vec<HistoryTurn>>,
 ) -> Result<ChatReply, String> {
     if question.trim().is_empty() {
         return Err("пустой вопрос".into());
@@ -408,12 +447,22 @@ async fn send_message(
         snap.answer.clear();
         snap.done = false;
     }
+    // Новый запрос сбрасывает флаг отмены прошлой генерации (F-002).
+    app.gen_cancel.store(false, Ordering::SeqCst);
     let generation = cfg.generation.clone();
     let q = question.trim().to_string();
+    // История диалога (F-001): фронтенд присылает предыдущие ходы активного
+    // треда; тримминг по бюджету делает trim_history внутри format_prompt_with_history.
+    let history = history.unwrap_or_default();
     let emitter = app_handle.clone();
     let snap_state = app.clone();
     let generated = tauri::async_runtime::spawn_blocking(move || {
-        generate_response_streaming(&llm, &q, &context, &generation, |piece| {
+        generate_response_streaming(&llm, &q, &context, &history, &generation, |piece| {
+            // Пользовательский «стоп» (F-002): колбэк возвращает false —
+            // цикл генерации прерывается, частичный текст сохраняется.
+            if snap_state.gen_cancel.load(Ordering::SeqCst) {
+                return false;
+            }
             {
                 let mut snap = snap_state.gen_stream.lock();
                 match piece.kind {
@@ -431,6 +480,7 @@ async fn send_message(
             if let Err(e) = emitter.emit("gen-token", event) {
                 eprintln!("gen: emit: {e}");
             }
+            true
         })
     })
     .await
@@ -462,6 +512,7 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> Result<StatusInfo, Strin
         .map_err(|e| format!("Qdrant: {e:#}"))?;
     let cfg = app.cfg.lock();
     let llm_loaded = app.llm.lock().is_some();
+    let llm_error = app.llm_error.lock().clone();
     Ok(StatusInfo {
         qdrant_url: cfg.qdrant.url.clone(),
         collection: cfg.qdrant.collection.clone(),
@@ -469,14 +520,18 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> Result<StatusInfo, Strin
         top_k: cfg.qdrant.top_k,
         embedding_model: cfg.embedding.model.clone(),
         model_path_set: !cfg.model_path.trim().is_empty(),
-        generator_stub: !llm_loaded,
+        llm_loaded,
+        llm_error,
     })
 }
 
 /// Проверка модели для решения "чат или экран настройки".
+/// F-015: источник — AppState.cfg (обновляется после каждой записи на диск),
+/// а не повторное чтение config.toml с диска.
 #[tauri::command]
 async fn get_model_status(state: State<'_, Arc<AppState>>) -> Result<ModelStatus, String> {
-    read_model_status(&state.inner().cfg_path)
+    let cfg = state.inner().cfg.lock().clone();
+    Ok(model_status_from(&cfg))
 }
 
 /// Последний снимок прогресса загрузки (фронтенд опрашивает как запасной
@@ -518,7 +573,8 @@ async fn pick_model_file(state: State<'_, Arc<AppState>>) -> Result<Option<Model
     save_string_field(&app.cfg_path, "model_path", &path_str)
         .map_err(|e| format!("запись config.toml: {e:#}"))?;
     reload_cfg_preserving_port(&app)?;
-    Ok(Some(read_model_status(&app.cfg_path)?))
+    let status = model_status_from(&app.cfg.lock());
+    Ok(Some(status))
 }
 
 /// Фоновая задача скачивания: события прогресса в канал "download-progress",
@@ -531,7 +587,22 @@ async fn run_download(
     cancel: CancelToken,
 ) -> Result<(), String> {
     let cfg = AppConfig::load(&app.cfg_path).map_err(|e| format!("config.toml: {e:#}"))?;
-    let dest = cfg.download_dir().join(filename_from_url(&url));
+    let download_dir = cfg.download_dir();
+    let dest = download_dir.join(filename_from_url(&url));
+    // Защитная проверка (F-007, belt-and-braces к фильтру сепараторов в
+    // filename_from_url): каталог назначения обязан остаться внутри каталога
+    // загрузки — иначе URL уводит запись произвольных файлов.
+    if let Some(parent) = dest.parent() {
+        if let (Ok(base), Ok(actual)) = (download_dir.canonicalize(), parent.canonicalize()) {
+            if !actual.starts_with(&base) {
+                return Err(
+                    "имя файла из URL уводит запись за пределы каталога загрузки — \
+                     проверь model_download_url"
+                        .into(),
+                );
+            }
+        }
+    }
     let spec = DownloadSpec {
         url: url.clone(),
         expected_sha256: {
@@ -637,6 +708,14 @@ async fn cancel_model_download(state: State<'_, Arc<AppState>>) -> Result<(), St
     Ok(())
 }
 
+/// Прерывание активной генерации (F-002): флаг проверяется в колбэке
+/// каждого токена; частичный ответ сохраняется в чате и в gen_stream.
+#[tauri::command]
+async fn stop_generation(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.inner().gen_cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 /// Снимок настроек генерации для окна настроек фронтенда.
 #[derive(Serialize)]
 pub struct SettingsInfo {
@@ -650,8 +729,9 @@ pub struct SettingsInfo {
     pub n_ctx: u32,
 }
 
-fn read_settings(cfg_path: &std::path::Path) -> Result<SettingsInfo, String> {
-    let cfg = AppConfig::load(cfg_path).map_err(|e| format!("config.toml: {e:#}"))?;
+/// Снимок настроек из уже загруженного конфига (F-015: единый источник —
+/// AppState.cfg; перечитывание с диска нужно только после внешней правки).
+fn settings_from(cfg: &AppConfig) -> SettingsInfo {
     let path = cfg.model_file_path();
     let model_name = if cfg.model_ready() {
         gguf_display_name(&path).unwrap_or_else(|| {
@@ -662,19 +742,19 @@ fn read_settings(cfg_path: &std::path::Path) -> Result<SettingsInfo, String> {
     } else {
         String::new()
     };
-    Ok(SettingsInfo {
+    SettingsInfo {
         model_path: cfg.model_path.clone(),
         model_name,
         temperature: cfg.generation.temperature,
         max_tokens: cfg.generation.max_tokens,
         n_ctx: cfg.generation.n_ctx,
-    })
+    }
 }
 
 /// Текущие настройки: путь/имя модели + параметры [generation].
 #[tauri::command]
 async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsInfo, String> {
-    read_settings(&state.inner().cfg_path)
+    Ok(settings_from(&state.inner().cfg.lock()))
 }
 
 /// Сохраняет temperature/max_tokens в config.toml (с сохранением комментариев)
@@ -700,7 +780,8 @@ async fn set_settings(
     .map_err(|e| format!("поток записи конфига: {e}"))?
     .map_err(|e| format!("запись config.toml: {e:#}"))?;
     reload_cfg_preserving_port(&app)?;
-    read_settings(&app.cfg_path)
+    let snapshot = settings_from(&app.cfg.lock());
+    Ok(snapshot)
 }
 
 pub fn run() {
@@ -752,7 +833,8 @@ pub fn run() {
             get_download_progress,
             get_gen_progress,
             get_settings,
-            set_settings
+            set_settings,
+            stop_generation
         ])
         .build(tauri::generate_context!())
         .expect("ошибка сборки Tauri-приложения")

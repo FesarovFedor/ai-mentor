@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ai-mentor",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "identifier": "local.ai-mentor.desktop",
   "build": {
     "frontendDist": "../frontend"
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
@@ -33,6 +33,7 @@
       "resources/onnxruntime_providers_shared.dll": "./onnxruntime_providers_shared.dll",
       "resources/qdrant-storage/": "qdrant-storage/",
       "resources/kb_chunks/": "kb_chunks/",
+      "resources/fastembed-cache/": "fastembed-cache/",
       "resources/defaults/config.toml": "defaults/config.toml"
     }
   }

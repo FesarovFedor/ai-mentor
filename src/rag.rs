@@ -10,9 +10,11 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use parking_lot::Mutex;
 use qdrant_client::qdrant::value::Kind;
 use qdrant_client::qdrant::{QueryPointsBuilder, ScoredPoint, Value};
 use qdrant_client::Qdrant;
@@ -35,7 +37,10 @@ pub struct SearchHit {
 pub struct Rag {
     cfg: AppConfig,
     client: Qdrant,
-    embedder: TextEmbedding,
+    /// Эмбеддер под sync-мьютексом в Arc: embed() — короткая синхронная
+    /// CPU-операция без .await, поэтому parking_lot (правило L4.3); Arc —
+    /// чтобы унести её в spawn_blocking, не двигая весь Rag (F-005).
+    embedder: Arc<Mutex<TextEmbedding>>,
     /// chunk_id -> исходный текст чанка
     chunks: HashMap<String, String>,
 }
@@ -79,7 +84,7 @@ impl Rag {
         Ok(Self {
             cfg,
             client,
-            embedder,
+            embedder: Arc::new(Mutex::new(embedder)),
             chunks,
         })
     }
@@ -118,11 +123,13 @@ impl Rag {
     }
 
     /// Вектор запроса: e5-префикс + L2-нормализация внутри fastembed.
-    /// Синхронный CPU-инференс; вызывать до await-ов (см. split-API ниже).
-    pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
+    /// Синхронный CPU-инференс (~50-200 мс); в async-контексте используйте
+    /// search(), который сам уносит это в spawn_blocking (F-005).
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
         let text = format!("{E5_QUERY_PREFIX}{}", query.trim());
         let vectors = self
             .embedder
+            .lock()
             .embed(vec![text], None)
             .context("ошибка эмбеддинга запроса")?;
         vectors.into_iter().next().ok_or_else(|| {
@@ -152,8 +159,26 @@ impl Rag {
     }
 
     /// Полный путь "текст -> топ-k" одним вызовом.
+    ///
+    /// F-005 (аналог P1 audit-v4): ONNX-эмбеддинг — блокирующий CPU-инференс
+    /// и раньше выполнялся прямо на worker-потоке tokio, подвешивая его и
+    /// удерживая гвард rag-мьютекса для всех конкурирующих команд. Теперь
+    /// эмбеддинг выполняется в блокирующем пуле; gRPC-поиск остаётся async.
     pub async fn search(&mut self, query: &str, k: usize) -> Result<Vec<SearchHit>> {
-        let vector = self.embed_query(query)?;
+        let embedder = Arc::clone(&self.embedder);
+        let text = format!("{E5_QUERY_PREFIX}{}", query.trim());
+        let q = query.to_string();
+        let vector = tokio::task::spawn_blocking(move || {
+            let vectors = embedder
+                .lock()
+                .embed(vec![text], None)
+                .context("ошибка эмбеддинга запроса")?;
+            vectors.into_iter().next().ok_or_else(|| {
+                anyhow::anyhow!("эмбеддер вернул пустой результат для запроса: {q:?}")
+            })
+        })
+        .await
+        .context("поток эмбеддинга прерван")??;
         self.search_by_vector(vector, k).await
     }
 
@@ -246,4 +271,41 @@ fn load_chunk_index(cfg: &AppConfig) -> Result<HashMap<String, String>> {
 /// Утилита для тестов/CLI: абсолютный путь до конфига проекта по умолчанию.
 pub fn default_config_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(chunk_id: &str, topic: Option<&str>, text: &str) -> SearchHit {
+        SearchHit {
+            score: 0.5,
+            chunk_id: chunk_id.to_string(),
+            parent_doc_id: None,
+            topic: topic.map(str::to_string),
+            chunk_index: None,
+            text: text.to_string(),
+        }
+    }
+
+    /// Формат фрагментов — критичная константа (паритет с Python-эталоном):
+    /// "[Фрагмент N | тема: T]\nтекст", фрагменты через пустую строку.
+    #[test]
+    fn format_context_matches_canonical_layout() {
+        let hits = vec![
+            hit("c1", Some("Квантование"), "текст про квантование"),
+            hit("c2", None, "текст без темы"),
+        ];
+        let ctx = format_context(&hits);
+        assert_eq!(
+            ctx,
+            "[Фрагмент 1 | тема: Квантование]\nтекст про квантование\n\n\
+             [Фрагмент 2 | тема: -]\nтекст без темы"
+        );
+    }
+
+    #[test]
+    fn format_context_empty() {
+        assert_eq!(format_context(&[]), "");
+    }
 }

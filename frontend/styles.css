@@ -635,3 +635,10 @@ body.setup-mode .backdrop{ display:none; }
   margin-top: 14px;
   font-size: 10.5px; color: var(--text-faint);
 }
+
+/* ================= Блокировка сайдбара на время генерации (F-003)
+   Переключение тредов во время стрима теряло живое сообщение и
+   «просачивало» финальный ответ в другой диалог. */
+.history.locked{
+  pointer-events: none; opacity: .45;
+}

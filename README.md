@@ -1,4 +1,4 @@
-# AI Mentor
+﻿# AI Mentor
 
 **EN** | [RU](README.ru.md)
 
@@ -33,7 +33,7 @@ generation.
 | Inference | llama.cpp (`llama-cpp-2`) on CUDA 12, KV Q4_0 + FlashAttention |
 | Vector DB | Qdrant 1.19 (gRPC), running as a Tauri sidecar |
 | Embeddings | intfloat/multilingual-e5-small via fastembed (ONNX) |
-| Frontend | Vanilla HTML/CSS/JS, markdown-it + DOMPurify (CSP `default-src 'self'`) |
+| Frontend | Vanilla HTML/CSS/JS, markdown-it + DOMPurify (CSP `default-src 'self'`, hardened with `object-src 'none'; base-uri 'none'; frame-ancestors 'none'`) |
 
 ## 📦 Installation
 
@@ -65,7 +65,7 @@ SHA-256 verified, cached in `target/deps_cache/`). See
 - NVIDIA GPU with 8+ GB VRAM and a recent driver — **CUDA Toolkit is NOT
   required** (the app bundles the CUDA runtime; the driver alone provides
   `nvcuda.dll`)
-- ~6 GB disk: app (~900 MB) + model (~2.7 GB) + headroom
+- ~8 GB disk: app (~1.1 GB) + model (~2.7 GB) + headroom
 
 If no NVIDIA driver is detected, inference is blocked with a friendly
 message linking to [nvidia.com/drivers](https://www.nvidia.com/drivers) —

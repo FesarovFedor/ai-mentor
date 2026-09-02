@@ -76,6 +76,9 @@ pub struct GenerationOutput {
     pub text: String,
     /// true — лимит max_tokens исчерпан до EOS модели.
     pub truncated: bool,
+    /// true — генерация прервана по требованию пользователя (F-002):
+    /// колбэк токена вернул false. Частичный текст сохранён в text.
+    pub stopped_by_user: bool,
     /// Фактическая длина промпта в токенах (после токенизации).
     pub n_prompt_tokens: usize,
     /// Число реально сгенерированных токенов (без EOG).
@@ -131,17 +134,19 @@ impl Inference {
     /// вызывать вне async-потока UI. Возвращает GenerationOutput с текстом,
     /// флагом обрыва по лимиту и фактическими счётчиками токенов.
     pub fn generate(&self, prompt: &str, params: GenerateParams) -> Result<GenerationOutput> {
-        self.generate_with_callback(prompt, params, |_| {})
+        self.generate_with_callback(prompt, params, |_| true)
     }
 
     /// То же, что generate(), но каждый сгенерированный токен (уже
     /// детокенизированный кусок UTF-8) отдаётся в on_token ДО декодирования
     /// следующего — основа потокового вывода во фронтенд (этап J).
+    /// F-002: колбэк возвращает false для прерывания генерации («стоп» в UI);
+    /// частичный текст сохраняется, stopped_by_user = true.
     pub fn generate_with_callback(
         &self,
         prompt: &str,
         params: GenerateParams,
-        mut on_token: impl FnMut(&str),
+        mut on_token: impl FnMut(&str) -> bool,
     ) -> Result<GenerationOutput> {
         let n_ctx_train = self.model.n_ctx_train();
         let n_ctx = params.n_ctx.clamp(512, n_ctx_train.max(512));
@@ -231,6 +236,7 @@ impl Inference {
         let mut out = String::new();
         let mut token_offsets: Vec<usize> = Vec::new();
         let mut truncated = true;
+        let mut stopped_by_user = false;
         let first_gen_pos = prompt_tokens.len() as i32;
         for pos in first_gen_pos..first_gen_pos + max_new as i32 {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
@@ -244,7 +250,12 @@ impl Inference {
                 .token_to_piece(token, &mut decoder, true, None)
                 .map_err(|e| anyhow::anyhow!("ошибка детокенизации: {e}"))?;
             out.push_str(&piece);
-            on_token(&piece);
+            if !on_token(&piece) {
+                // «Стоп» от пользователя (F-002): цикл прерывается, частичный
+                // текст остаётся в out — вызывающая сторона решает, что с ним.
+                stopped_by_user = true;
+                break;
+            }
 
             batch.clear();
             batch
@@ -261,6 +272,7 @@ impl Inference {
         Ok(GenerationOutput {
             text: out,
             truncated,
+            stopped_by_user,
             n_prompt_tokens: prompt_tokens.len(),
             n_gen_tokens,
             token_offsets,

@@ -99,6 +99,10 @@ fn part_paths(dest: &Path) -> (PathBuf, PathBuf) {
 
 /// Имя файла по URL: последний сегмент без query/fragment, декодированный
 /// процент-энкодинг и очищенный от запрещённых в Windows символов.
+///
+/// Сепараторы `/` и `\` заменяются вместе с прочими запрещёнными символами:
+/// без этого percent-encoded `..%5c..%5c` после декодирования превращается
+/// в путь с обходом каталога загрузки (path traversal, фикс F-007 аудита).
 pub fn filename_from_url(url: &str) -> String {
     let raw = url.split(['#', '?']).next().unwrap_or(url);
     let raw = raw.rsplit('/').next().unwrap_or(raw);
@@ -106,7 +110,7 @@ pub fn filename_from_url(url: &str) -> String {
     let cleaned: String = decoded
         .chars()
         .map(|c| {
-            if c.is_control() || "<>:\"|?*".contains(c) {
+            if c.is_control() || "<>:\"|?*/\\".contains(c) {
                 '_'
             } else {
                 c
@@ -198,10 +202,27 @@ impl Downloader {
             .with_context(|| format!("не удалось создать каталог {}", dest_dir.display()))?;
 
         let (part, meta_path) = part_paths(&spec.dest);
-        let saved_meta: Option<PartMeta> = std::fs::read(&meta_path)
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<PartMeta>(&raw).ok())
-            .filter(|m| m.url == spec.url);
+        // F-024: битые/нераспарсиваемые метаданные (.part.meta.json) раньше
+        // молча сбрасывали загрузку на ноль. BOM толерируем, прочий мусор —
+        // с предупреждением в stderr.
+        let saved_meta: Option<PartMeta> = match std::fs::read(&meta_path) {
+            Ok(raw) => {
+                let stripped = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+                match serde_json::from_slice::<PartMeta>(stripped) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        eprintln!(
+                            "предупреждение: метаданные {} повреждены ({e}) — \
+                             загрузка начнётся с нуля",
+                            meta_path.display()
+                        );
+                        None
+                    }
+                }
+            }
+            Err(_) => None,
+        }
+        .filter(|m| m.url == spec.url);
         // total из прошлой сессии: 0 = неизвестен/нет метаданных
         let meta_total = saved_meta.as_ref().map(|m| m.total).unwrap_or(0);
 
@@ -403,22 +424,19 @@ impl Downloader {
                 );
             }
         }
-        if spec
-            .dest
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
-        {
-            let magic_ok = std::fs::File::open(&part)
-                .and_then(|mut f| {
-                    let mut head = [0u8; 4];
-                    f.read_exact(&mut head)?;
-                    Ok(&head == b"GGUF")
-                })
-                .unwrap_or(false);
-            if !magic_ok {
-                cleanup_part(&part, &meta_path);
-                bail!("файл не начинается с магии GGUF — похоже, скачалась HTML-страница ошибки");
-            }
+        // F-010 (аналог S4 audit-v4): магия проверяется ВСЕГДА, независимо от
+        // расширения имени (URL мог отдать model.bin, query съел расширение и
+        // т.п.). Без этого HTML-страница ошибки проходила бы как «модель».
+        let magic_ok = std::fs::File::open(&part)
+            .and_then(|mut f| {
+                let mut head = [0u8; 4];
+                f.read_exact(&mut head)?;
+                Ok(&head == b"GGUF")
+            })
+            .unwrap_or(false);
+        if !magic_ok {
+            cleanup_part(&part, &meta_path);
+            bail!("файл не начинается с магии GGUF — похоже, скачалась HTML-страница ошибки");
         }
 
         std::fs::rename(&part, &spec.dest).with_context(|| {
@@ -509,4 +527,58 @@ pub fn sha256_hex_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-007: сепараторы и percent-encoded traversal не должны уводить имя
+    /// файла за пределы каталога загрузки.
+    #[test]
+    fn filename_from_url_strips_path_separators() {
+        // Злонамеренный URL из находки F-007: %5c = '\', %2e%2e = '..'
+        let name = filename_from_url("https://host/%2e%2e%5c%2e%2e%5cWindows\\Temp\\evil.gguf");
+        assert!(!name.contains('\\'), "backslash должен заменяться: {name}");
+        assert!(!name.contains('/'), "slash должен заменяться: {name}");
+        // Имя безопасно: join(download_dir, name) не уходит за пределы каталога.
+        assert_eq!(
+            Path::new(&name).file_name(),
+            Some(std::ffi::OsStr::new(name.as_str()))
+        );
+
+        // Обычный слэш-вариант traversal (после rsplit последнего сегмента
+        // уже нет '/', но закодированный %2f приходит именно сюда).
+        assert_eq!(filename_from_url("https://host/a%2fb.gguf"), "a_b.gguf");
+
+        // Прямой backslash в сегменте (Windows-стиль URL-мусора).
+        let name = filename_from_url("https://host/..%5C..%5Cevil.gguf");
+        assert!(!name.contains('\\') && !name.contains('/'), "{name}");
+        assert_eq!(
+            Path::new(&name).file_name(),
+            Some(std::ffi::OsStr::new(name.as_str()))
+        );
+    }
+
+    #[test]
+    fn filename_from_url_basics() {
+        assert_eq!(
+            filename_from_url("https://example.com/models/nanbeige.Q4_K_M.gguf?download=1"),
+            "nanbeige.Q4_K_M.gguf"
+        );
+        assert_eq!(filename_from_url("https://example.com/"), "model.gguf");
+        assert_eq!(filename_from_url("https://example.com/..gguf"), "gguf");
+        // Windows-запрещённые символы — заменяются ('?' режется как query-разделитель).
+        assert_eq!(filename_from_url("https://h/a<b>|c.gguf"), "a_b__c.gguf");
+    }
+
+    #[test]
+    fn percent_decode_minimal_decodes_and_preserves() {
+        assert_eq!(percent_decode_minimal("%2e%2e%5C"), "..\\");
+        assert_eq!(percent_decode_minimal("a%20b"), "a b");
+        // Незакрытый % остаётся как есть.
+        assert_eq!(percent_decode_minimal("100%"), "100%");
+        // Не-UTF8 байты не паникуют (lossy).
+        assert_eq!(percent_decode_minimal("%FF"), "\u{FFFD}");
+    }
 }

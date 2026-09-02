@@ -48,6 +48,10 @@ scripts/
 tools_migrate/
 conc.md
 
+# Machine-specific cargo config (see .cargo/config.toml.example) — leaks
+# maintainer's absolute paths and breaks contributor builds if tracked
+.cargo/config.toml
+
 # L5: bundled binary deps are fetched by build.rs, never stored in git
 src-tauri/resources/cudart64_12.dll
 src-tauri/resources/cublas64_12.dll
@@ -57,7 +61,11 @@ src-tauri/resources/onnxruntime_providers_shared.dll
 src-tauri/resources/qdrant/qdrant.exe
 src-tauri/resources/qdrant-storage/
 src-tauri/resources/kb_chunks/
+src-tauri/resources/fastembed-cache/
 src-tauri/resources/defaults/config.toml
 src-tauri/binaries/
 target/deps_cache/
 .qdrant-initialized
+
+# Internal audit workspace (k3) — не для публичного репозитория
+audit-k3/

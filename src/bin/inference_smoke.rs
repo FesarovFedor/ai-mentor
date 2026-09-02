@@ -115,7 +115,7 @@ async fn main() -> ExitCode {
     // 3. генерация
     let context = format_context(&hits);
     let t1 = Instant::now();
-    let answer = match generate_response(&inf, &question, &context, &cfg.generation) {
+    let answer = match generate_response(&inf, &question, &context, &[], &cfg.generation) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("GENERATE FAIL: {e:#}");

@@ -62,7 +62,15 @@ async fn main() -> ExitCode {
     // Список вопросов: из --file либо единственный позиционный аргумент.
     let mut questions: Vec<String> = Vec::new();
     if let Some(path) = &args.file {
-        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        // F-017: битый путь раньше молча давал «нет вопросов»; теперь —
+        // явная ошибка с путём.
+        let raw = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("не удалось прочитать файл вопросов {}: {e}", path);
+                return ExitCode::FAILURE;
+            }
+        };
         for line in raw.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {

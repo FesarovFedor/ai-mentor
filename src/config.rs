@@ -48,10 +48,13 @@ pub struct GenerationConfig {
 
 impl Default for GenerationConfig {
     fn default() -> Self {
+        // Синхронизировано с production-конфигом (F-014 аудита): у reasoning-
+        // модели <think> до ~3105 токенов (замеры этапа G), поэтому меньший
+        // бюджет тихо обрезал бы ответ. Подробности — decisions.md D5/G1.
         Self {
             temperature: 0.7,
-            max_tokens: 512,
-            n_ctx: 4096,
+            max_tokens: 5500,
+            n_ctx: 12288,
             chat_template: String::from("chatml"),
         }
     }
@@ -146,6 +149,18 @@ impl AppConfig {
     }
 }
 
+/// Атомарная запись файла (F-012 аудита, аналог Q2 audit-v4): сначала во
+/// временный файл в том же каталоге, затем rename поверх целевого. Внезапное
+/// завершение процесса посреди записи больше не даёт битый config.toml:
+/// либо старая версия, либо полностью записанная новая.
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, contents).with_context(|| format!("не удалось записать {}", tmp.display()))?;
+    // fs::rename на Windows использует MoveFileEx с заменой существующего.
+    fs::rename(&tmp, path).with_context(|| format!("не удалось заменить {}", path.display()))?;
+    Ok(())
+}
+
 /// Записывает строковое поле верхнего уровня config.toml (например model_path),
 /// сохраняя форматирование и комментарии остальных полей.
 pub fn save_string_field(config_path: &Path, field: &str, value: &str) -> Result<()> {
@@ -155,9 +170,7 @@ pub fn save_string_field(config_path: &Path, field: &str, value: &str) -> Result
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("ошибка парсинга {}", config_path.display()))?;
     doc[field] = toml_edit::value(value);
-    fs::write(config_path, doc.to_string())
-        .with_context(|| format!("не удалось записать {}", config_path.display()))?;
-    Ok(())
+    atomic_write(config_path, &doc.to_string())
 }
 
 /// Записывает параметры [generation] (temperature/max_tokens) в config.toml,
@@ -177,7 +190,5 @@ pub fn save_generation_fields(config_path: &Path, temperature: f64, max_tokens: 
     // без артефактов округления f32.
     doc["generation"]["temperature"] = toml_edit::value(temperature);
     doc["generation"]["max_tokens"] = toml_edit::value(i64::from(max_tokens));
-    fs::write(config_path, doc.to_string())
-        .with_context(|| format!("не удалось записать {}", config_path.display()))?;
-    Ok(())
+    atomic_write(config_path, &doc.to_string())
 }

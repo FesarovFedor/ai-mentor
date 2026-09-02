@@ -85,11 +85,15 @@
     return typeof clean === "string" ? clean : null;
   }
 
-  // Добавляет кнопки копирования ко всем <pre><code> в элементе
+  // Добавляет кнопки копирования ко всем <pre><code> в элементе.
+  // F-006 (аналог P2 audit-v4): сканируем только ещё не обработанные <pre>
+  // (класс code-copy-ready ставится после обработки) — без этого каждый
+  // токен стрима пересканировал весь накопленный DOM.
   function injectCodeCopyButtons(rootEl) {
-    var pres = rootEl.querySelectorAll("pre");
+    var pres = rootEl.querySelectorAll("pre:not(.code-copy-ready)");
     pres.forEach(function (pre) {
-      if (pre.querySelector(".code-copy-btn")) return; // уже есть
+      if (pre.querySelector(".code-copy-btn")) return;
+      pre.classList.add("code-copy-ready");
       var btn = document.createElement("button");
       btn.className = "code-copy-btn";
       btn.textContent = "copy";
@@ -492,8 +496,16 @@
 
   function setBusy(b) {
     busy = b;
-    btnSend.disabled = b;
+    // Кнопка отправки превращается в «стоп» на время генерации (F-002):
+    // прерывание долгой reasoning-генерации — стандартный элемент LLM-UI.
+    btnSend.disabled = false;
+    btnSend.textContent = b ? "стоп ■" : "отпр. ↵";
     promptEl.disabled = b;
+    // Переключение тредов блокируется на время генерации (F-003):
+    // иначе живое сообщение терялось из DOM, а финальный ответ
+    // «просачивался» в ленту другого диалога.
+    historyEl.classList.toggle("locked", b);
+    btnNew.disabled = b;
     document.querySelector(".composer__box").classList.toggle("disabled", b);
   }
 
@@ -510,6 +522,13 @@
       t.title = q.length > 34 ? q.slice(0, 33) + "…" : q;
       t.dateLabel = nowTime();
     }
+    // История диалога (F-001): предыдущие ходы треда уходят в промпт.
+    // thinking не включаем — модель видит только финальные ответы.
+    var history = t.messages.map(function (m) {
+      if (m.role === "user" && m.text) return { role: "user", content: m.text };
+      if (m.role === "ai" && m.answer) return { role: "assistant", content: m.answer };
+      return null;
+    }).filter(Boolean);
     t.messages.push({ role: "user", text: q });
 
     promptEl.value = "";
@@ -521,7 +540,7 @@
     startLiveMessage();
     startGenPoller();
 
-    invoke("send_message", { question: q })
+    invoke("send_message", { question: q, history: history })
       .then(function (reply) {
         stopGenPoller();
         finalizeLive();
@@ -531,9 +550,12 @@
           thinking: reply.thinking,
           sources: reply.sources
         });
-        // финальный рендер канонический (абзацы + сворачиваемые источники),
-        // он заменяет живое сообщение, чтобы история и стрим совпадали
-        addAiAnswer(reply.answer, reply.sources, null, reply.thinking);
+        // Финальный рендер — только если пользователь остался в этом треде
+        // (F-003): ответ всегда записан в t.messages, а при переключении
+        // треда его отрисует renderFeed по клику на диалог.
+        if (t.id === activeId) {
+          addAiAnswer(reply.answer, reply.sources, null, reply.thinking);
+        }
         setBusy(false);
         promptEl.focus();
       })
@@ -542,7 +564,9 @@
         finalizeLive();
         var msg = errText(e);
         t.messages.push({ role: "ai", error: msg });
-        addAiAnswer("", [], msg);
+        if (t.id === activeId) {
+          addAiAnswer("", [], msg);
+        }
         setBusy(false);
         promptEl.focus();
       });
@@ -567,16 +591,23 @@
         kbInfo.textContent =
           s.collection + ": " + s.points + " чанков · " + s.embedding_model;
         ctxChip.textContent = "top-k " + s.top_k;
-        llmReady = !s.generator_stub;
-        var label = s.generator_stub
-          ? "модель не загружена" + (s.model_path_set ? "" : " (model_path пуст)")
-          : "LLM локально";
+        // F-018: поле переименовано generator_stub -> llm_loaded (прямая
+        // семантика: true = реальная LLM загружена).
+        llmReady = s.llm_loaded;
+        var label = s.llm_loaded
+          ? "LLM локально"
+          : "модель не загружена" + (s.model_path_set ? "" : " (model_path пуст)");
         statusText.innerHTML = "";
         var dot = statusText.parentElement.querySelector(".dot");
         var b = document.createElement("b");
         b.textContent = label;
         statusText.appendChild(b);
         statusText.appendChild(document.createTextNode(" · ретрив онлайн"));
+        // F-004: причина неудачной предзагрузки видна сразу в статус-баре,
+        // а не только при первой отправке сообщения.
+        if (s.llm_error) {
+          statusText.appendChild(document.createTextNode(" · причина: " + s.llm_error));
+        }
         if (dot) dot.remove(); // статус подтверждён — пульс больше не нужен
         // приветствие зависит от статуса генератора; обновить пустой диалог
         var t0 = activeThread();
@@ -735,7 +766,10 @@
   navToggle.addEventListener("click", function () { body.classList.toggle("nav-open"); });
   backdrop.addEventListener("click", function () { body.classList.remove("nav-open"); });
 
-  btnNew.addEventListener("click", function () { newThread(false); });
+  btnNew.addEventListener("click", function () {
+    if (busy) return; // F-003: в момент генерации треды не переключаются
+    newThread(false);
+  });
 
   promptEl.addEventListener("input", function () {
     promptEl.style.height = "auto";
@@ -748,7 +782,14 @@
       send();
     }
   });
-  btnSend.addEventListener("click", send);
+  btnSend.addEventListener("click", function () {
+    // F-002: во время генерации та же кнопка работает как «стоп».
+    if (busy) {
+      if (invoke) invoke("stop_generation").catch(function () {});
+      return;
+    }
+    send();
+  });
 
   themeToggle.addEventListener("click", function () {
     var cur = document.documentElement.getAttribute("data-theme") === "light"

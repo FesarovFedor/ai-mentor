@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "mentor-core"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Ядро десктоп-приложения 'ИИ-наставник': RAG поверх локального Qdrant + заглушка LLM"
 
@@ -28,6 +28,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 anyhow = "1"
+# Короткие синхронные секции без .await (правило L4.3) — например,
+# эмбеддер под мьютексом внутри spawn_blocking (F-005).
+parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "native-tls"] }
 sha2 = "0.10"
 hex = "0.4"

@@ -79,6 +79,7 @@ fn main() {
     ensure_onnx_dlls(&cache, &resources);
     ensure_qdrant_sidecar(&cache, &binaries);
     ensure_kb_data(&workspace, &resources);
+    ensure_fastembed_cache(&workspace, &resources);
 
     println!("cargo:rerun-if-changed=build.rs");
     tauri_build::build();
@@ -270,13 +271,35 @@ fn ensure_kb_data(workspace: &Path, resources: &Path) {
     // Шаблон config.toml для первого запуска (пути внутри будут переписаны
     // на AppData при инициализации приложения). Всегда перезаписывается из
     // корневого config.toml репозитория — единый источник правды.
+    // F-021 (аудит k3): model_path принудительно сбрасывается в "" — иначе
+    // машинный путь мейнтейнера (подтверждённый случай D:\AI_tests\...)
+    // попадал в бандл/MSI, и первый запуск вёл себя по-разному в
+    // зависимости от окружения.
     let defaults = resources.join("defaults");
     fs::create_dir_all(&defaults).expect("создание defaults dir");
     let cfg_src = workspace.join("config.toml");
     let cfg_dest = defaults.join("config.toml");
     if cfg_src.exists() {
-        fs::copy(&cfg_src, &cfg_dest).expect("копирование шаблона config.toml");
+        let raw = fs::read_to_string(&cfg_src).expect("чтение корневого config.toml");
+        let mut doc = raw
+            .parse::<toml_edit::DocumentMut>()
+            .expect("парсинг корневого config.toml");
+        doc["model_path"] = toml_edit::value("");
+        fs::write(&cfg_dest, doc.to_string()).expect("запись шаблона defaults/config.toml");
     }
+}
+
+/// Кэш embedding-модели fastembed (F-026, аудит k3): без него ONNX-веса
+/// (~465 МБ) при ПЕРВОМ запуске приложения молча качались с HuggingFace —
+/// вопреки обещанию «Zero cloud / единственное скачивание — GGUF», а на
+/// офлайн-машине init падал. Теперь кэш входит в бандл и разворачивается
+/// provisioning'ом первого запуска. Источник — локальное дерево (.models/
+/// fastembed, данные мейнтейнера, в git не хранятся), переопределяется env
+/// FASTEMBED_SRC.
+fn ensure_fastembed_cache(workspace: &Path, resources: &Path) {
+    let cache_src = env::var("FASTEMBED_SRC")
+        .map_or_else(|_| workspace.join(".models/fastembed"), PathBuf::from);
+    copy_tree_if_missing(&cache_src, &resources.join("fastembed-cache"));
 }
 
 /// Копирует дерево src -> dest, только если dest ещё не существует

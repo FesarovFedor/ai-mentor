@@ -1,4 +1,4 @@
-# AI Mentor
+﻿# AI Mentor
 
 [EN](README.md) | **RU**
 
@@ -8,9 +8,9 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue.svg)
 ![CUDA](https://img.shields.io/badge/CUDA-12-76B900.svg)
 
-Полностью офлайн десктоп-приложение «ИИ-наставник» для начинающих
+Полностью офлайн десктоп-приложение В«РР-наставник» для начинающих
 LLM-инженеров: RAG поверх локального Qdrant + инференс GGUF через llama.cpp
-на вашей NVIDIA-видеокарте. Из машины не уходит ничего: ни вопросы, ни база
+на вашей NVIDIA-видеокарте. Рз машины не уходит ничего: ни вопросы, ни база
 знаний, ни генерация.
 
 ![AI Mentor — чат с готовым ответом](assets/hero.png)
@@ -30,10 +30,10 @@ LLM-инженеров: RAG поверх локального Qdrant + инфе�
 | --- | --- |
 | Оболочка | Tauri v2 (Rust + системный WebView2) |
 | Ядро | Rust-крейт `mentor-core` |
-| Инференс | llama.cpp (`llama-cpp-2`) на CUDA 12, KV Q4_0 + FlashAttention |
+| Рнференс | llama.cpp (`llama-cpp-2`) на CUDA 12, KV Q4_0 + FlashAttention |
 | Векторная БД | Qdrant 1.19 (gRPC), работает как sidecar приложения |
 | Эмбеддинги | intfloat/multilingual-e5-small через fastembed (ONNX) |
-| Фронтенд | Vanilla HTML/CSS/JS, markdown-it + DOMPurify (CSP `default-src 'self'`) |
+| Фронтенд | Vanilla HTML/CSS/JS, markdown-it + DOMPurify (CSP `default-src 'self'` + харденинг `object-src 'none'; base-uri 'none'; frame-ancestors 'none'`) |
 
 ## 📦 Установка
 
@@ -65,7 +65,7 @@ cargo tauri build
 - NVIDIA GPU с 8+ ГБ VRAM и свежим драйвером — **CUDA Toolkit НЕ нужен**
   (приложение несёт CUDA runtime с собой; от драйвера нужен только
   `nvcuda.dll`)
-- ~6 ГБ диска: приложение (~900 МБ) + модель (~2,7 ГБ) + запас
+- ~8 ГБ диска: приложение (~1,1 ГБ) + модель (~2,7 ГБ) + запас
 
 Если драйвер NVIDIA не обнаружен, инференс блокируется с понятным
 сообщением и ссылкой на [nvidia.com/drivers](https://www.nvidia.com/drivers) —
@@ -140,7 +140,7 @@ Qdrant: закройте его или перезагрузитесь. Выбр�
 [Issues](https://github.com/FesarovFedor/ai-mentor/issues) (шаблоны
 прилагаются).
 
-## 📄 История изменений
+## 📄 Рстория изменений
 
 [CHANGELOG.md](CHANGELOG.md) (формат Keep a Changelog).
 

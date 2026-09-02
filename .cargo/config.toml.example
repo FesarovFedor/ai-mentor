@@ -1,0 +1,18 @@
+# Конфигурация Cargo для этого проекта (шаблон: скопируйте в
+# .cargo/config.toml и поправьте путь под свою машину).
+#
+# llama-cpp-sys-2 генерирует биндинги через bindgen, которому нужен libclang.
+# Два варианта:
+#
+# 1. Portable LLVM (как у мейнтейнера, см. decisions.md D6):
+#    скачайте релиз llvm-project с GitHub, распакуйте и укажите путь
+#    к каталогу bin/ с libclang.dll:
+#
+# [env]
+# LIBCLANG_PATH = "C:\\path\\to\\clang+llvm-23.1.0-x86_64-pc-windows-msvc\\bin"
+#
+# 2. Системный libclang: если LLVM установлен обычным способом и libclang
+#    доступен в PATH, секцию [env] можно не указывать вовсе.
+#
+# Файл .cargo/config.toml не трекается в git (машинно-специфичный путь);
+# в репозитории лежит только этот .example.

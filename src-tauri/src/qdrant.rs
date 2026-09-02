@@ -48,7 +48,9 @@ impl Default for QdrantProc {
 /// успешно проходит даже когда другой процесс держит 0.0.0.0:P — и сервис
 /// потом умирает на реальном bind'е. connect-пробой детектирует любого
 /// слушателя. Редкая гонка «проверили -> заняли» ловится wait_for_ready.
-pub fn find_free_port(start: u16, skip: Option<u16>) -> u16 {
+/// Возврат Result (не panic, F-019): исчерпание диапазона — управляемая
+/// ошибка, init_state покажет её диалогом, а не уронит процесс.
+pub fn find_free_port(start: u16, skip: Option<u16>) -> Result<u16> {
     // Ограничение перебора: защита от теоретического зацикливания на u16
     // (wrapping_add); на практике свободный порт находится в первых десятках.
     for offset in 0..1024u16 {
@@ -56,10 +58,10 @@ pub fn find_free_port(start: u16, skip: Option<u16>) -> u16 {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let busy = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok();
         if !busy && Some(port) != skip {
-            return port;
+            return Ok(port);
         }
     }
-    panic!("не удалось найти свободный порт начиная с {start}");
+    bail!("не удалось найти свободный порт начиная с {start}: 1024 порта подряд заняты")
 }
 
 /// Путь к qdrant.exe: Tauri кладёт externalBin рядом с основным бинарем
@@ -67,10 +69,10 @@ pub fn find_free_port(start: u16, skip: Option<u16>) -> u16 {
 /// с target/<profile>/mentor-tauri.exe, имя уже без target-triple суффикса
 /// в бандле; в dev-запусках tauri-build копирует суффиксованный файл).
 pub fn sidecar_exe_path() -> Result<std::path::PathBuf> {
-    let dir = std::env::current_exe()
-        .context("не удалось определить каталог приложения")?
+    let exe = std::env::current_exe().context("не удалось определить каталог приложения")?;
+    let dir = exe
         .parent()
-        .expect("exe лежит в каталоге")
+        .with_context(|| format!("exe без родительского каталога: {}", exe.display()))?
         .to_path_buf();
     // prod-бандл: qdrant.exe; dev (cargo build без бандла): суффикс triple.
     let candidates = [
@@ -105,11 +107,15 @@ pub fn start_qdrant(
     exe: &Path,
     storage_path: &Path,
 ) -> Result<(u16, u16)> {
-    let http_port = find_free_port(6333, None);
-    let grpc_port = find_free_port(6334, Some(http_port));
+    let http_port = find_free_port(6333, None)?;
+    let grpc_port = find_free_port(6334, Some(http_port))?;
     let mut cmd = std::process::Command::new(exe);
     cmd.env("QDRANT__SERVICE__HTTP_PORT", http_port.to_string())
         .env("QDRANT__SERVICE__GRPC_PORT", grpc_port.to_string())
+        // F-008 аудита (аналог S2 audit-v4): дефолтный host у Qdrant —
+        // 0.0.0.0, база знаний была видна всей локальной сети без ключа.
+        // Приложение ходит только на 127.0.0.1 — биндим sidecar туда же.
+        .env("QDRANT__SERVICE__HOST", "127.0.0.1")
         .env(
             "QDRANT__STORAGE__STORAGE_PATH",
             storage_path.to_string_lossy().into_owned(),
